@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Veritas · Live political fact-checking</title>
+<meta name="description" content="Watch live news, recorded programs and Shorts while claims are checked against established fact-checkers.">
+<meta name="theme-color" content="#245696">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Serif+4:wght@600;700&display=swap">
+<link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+<a class="skip" href="#stage">Skip to player</a>
+
+<header class="top">
+  <div class="brand">
+    <svg width="34" height="34" viewBox="0 0 40 40" aria-hidden="true"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#8CC4FF"/><stop offset="1" stop-color="#245696"/></linearGradient></defs><path d="M20 3l14 5v11c0 9-6 15-14 18C12 34 6 28 6 19V8z" fill="url(#g)" stroke="#C5CBD3" stroke-width="1.5"/><path d="M13 15l7 14 7-14" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <span class="wordmark">Veritas</span>
+    <span class="tag">Live fact-check</span>
+  </div>
+  <div class="actions">
+    <button class="btn ghost" id="btnDebate" aria-pressed="false">Debate mode</button>
+    <button class="btn ghost" id="btnText">Check text</button>
+    <button class="btn ghost" id="btnSettings">Settings</button>
+  </div>
+</header>
+
+<form class="omni" id="omni" autocomplete="off">
+  <label for="omniIn" class="omni-label">Check anything</label>
+  <input id="omniIn" type="text" placeholder="Paste a YouTube link (video, Short or live), an article link, or text that was sent to you">
+  <button class="btn primary" type="submit">Check</button>
+</form>
+
+<nav class="outlets" aria-label="Live news outlets">
+  <div class="outlet-scroll" id="outletList"></div>
+  <button class="btn add" id="btnAdd" type="button">+ Add outlet</button>
+</nav>
+
+<main class="theater">
+  <section class="stage" id="stage" aria-label="Player">
+    <div class="player" id="playerBox">
+      <iframe id="frame" title="Video player" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>
+      <div class="article-box" id="articleBox" hidden></div>
+      <div class="player-top"><span class="live" id="liveBadge">LIVE</span><span id="nowPlaying" class="now"></span><a id="openYT" class="open" target="_blank" rel="noopener">Open on YouTube ↗</a></div>
+      <div id="lower" class="lower" role="status" aria-live="polite" hidden></div>
+    </div>
+
+    <div class="timeline-wrap">
+      <div class="tl-head"><span>Timeline</span><span id="elapsed">00:00</span></div>
+      <div class="timeline" id="timeline"><div class="tl-rail"></div></div>
+      <div class="tl-legend"><span class="k t">True</span><span class="k m">Misleading</span><span class="k f">False</span><span class="k r">Related reporting</span><span class="k n">No match</span></div>
+    </div>
+
+    <div class="captions">
+      <div class="cap-head">
+        <span>Transcript <span class="src-status" id="srcStatus"></span></span>
+        <div class="cap-tools">
+          <label class="who" id="whoWrap" hidden>Speaking:
+            <select id="who"><option value="A">Speaker A</option><option value="B">Speaker B</option></select>
+          </label>
+          <button class="btn" id="btnMic" aria-pressed="false">Listen (mic)</button>
+          <button class="btn primary" id="btnDemo">Run demo</button>
+          <button class="btn ghost" id="btnClear">Clear</button>
+        </div>
+      </div>
+      <div class="cap-body" id="capBody">
+        <p class="empty">Pick a program below, paste a link above, or press <b>Run demo</b> to see sample checks.</p>
+      </div>
+    </div>
+  </section>
+
+  <aside class="rail" aria-label="Fact-check feed">
+    <div class="meters" id="meters"></div>
+    <div class="flags" id="flags" hidden></div>
+    <div class="rail-head">
+      <h2>Fact-check feed</h2>
+      <div class="seg" role="group" aria-label="Filter">
+        <button class="on" data-f="all">All</button><button data-f="flagged">Flagged</button>
+      </div>
+    </div>
+    <div class="tally" id="tally" aria-hidden="true"></div>
+    <div class="tally-txt" id="tallyTxt">No claims checked yet.</div>
+    <div class="cards" id="cards"></div>
+    <p class="fine">Automated and can be wrong. Results are published fact-checks related to a claim, not a ruling by Veritas. Opinions and predictions are not checked.</p>
+  </aside>
+</main>
+
+<section class="browse" aria-label="Programs and Shorts">
+  <div class="tabs" role="tablist">
+    <button role="tab" id="tabSched" aria-selected="true" data-tab="sched">TV schedule</button>
+    <button role="tab" id="tabTop" aria-selected="false" data-tab="top">Top political stories</button>
+    <button role="tab" id="tabShorts" aria-selected="false" data-tab="shorts">Shorts</button>
+    <button class="btn ghost refresh" id="btnRefresh">Refresh</button>
+  </div>
+
+  <div class="panel" id="panelSched">
+    <div class="filters" id="schedFilters"></div>
+    <div class="sched" id="schedList"><p class="heads-msg">Add your Google API key in Settings to load live and recent programs.</p></div>
+  </div>
+  <div class="panel" id="panelTop" hidden><div class="topgrid" id="topGrid"><p class="heads-msg">Add your Google API key in Settings to load stories.</p></div></div>
+  <div class="panel" id="panelShorts" hidden><div class="shorts" id="shortsGrid"><p class="heads-msg">Add your Google API key in Settings to load Shorts. You can also paste any Shorts link in the box at the top.</p></div></div>
+</section>
+
+<footer class="foot">Veritas is an independent project and is not affiliated with any broadcaster. Video is embedded from the original platform.</footer>
+
+<dialog id="dlgSettings">
+  <form method="dialog">
+    <h3>Settings</h3>
+    <p class="muted">Saved only in this browser. One Google API key can power everything below: enable <b>Fact Check Tools API</b>, <b>YouTube Data API v3</b> and (optional) <b>Custom Search API</b>, then restrict the key to your site address.</p>
+    <label>Google API key<input id="keyInput" type="password" autocomplete="off" placeholder="AIza…"></label>
+    <label>Related-reporting search engine ID (optional)<input id="cxInput" autocomplete="off" placeholder="Programmable Search Engine ID (cx)"></label>
+    <label>Transcript service URL (optional)<input id="workerInput" autocomplete="off" placeholder="https://your-worker.workers.dev"></label>
+    <div class="row"><button class="btn" value="cancel">Cancel</button><button class="btn primary" id="saveKey" value="ok">Save</button></div>
+  </form>
+</dialog>
+
+<dialog id="dlgText">
+  <form method="dialog">
+    <h3>Check text</h3>
+    <p class="muted">Paste an article, message or transcript. Each factual-sounding sentence is looked up.</p>
+    <textarea id="textIn" rows="9" placeholder="Paste text here…"></textarea>
+    <div class="row"><button class="btn" value="cancel">Cancel</button><button class="btn primary" id="runText" value="ok">Check</button></div>
+  </form>
+</dialog>
+
+<dialog id="dlgAdd">
+  <form method="dialog">
+    <h3>Add an outlet</h3>
+    <p class="muted">Paste a YouTube channel ID (starts with UC) or a Twitch channel link.</p>
+    <label>Name<input id="addName" placeholder="Outlet name"></label>
+    <label>Channel ID or link<input id="addRef" placeholder="UC… or https://www.twitch.tv/…"></label>
+    <div class="row"><button class="btn" value="cancel">Cancel</button><button class="btn primary" id="saveAdd" value="ok">Add</button></div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="assets/config.js"></script>
+<script src="assets/redflags.js"></script>
+<script src="assets/checker.js"></script>
+<script src="assets/youtube.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>
