@@ -70,7 +70,7 @@ V.checker = (() => {
     const k = text.toLowerCase().replace(/\s+/g, ' ').trim();
     if (cache.has(k)) return cache.get(k);
     const p = (async () => {
-      if (!V.settings.key) return { verdict: 'NOMATCH', detail: 'Add a Google API key in Settings to look up published fact-checks.', sources: [] };
+      if (!V.settings.key) return { verdict: 'NOMATCH', detail: 'Add a Google API key in Setup & settings (page footer) to look up published fact-checks.', sources: [] };
       // Tier 1
       let hits = (await factCheckSearch(text)).filter(h => h.sim >= 0.5 && h.url);
       if (hits.length) {

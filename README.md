@@ -14,6 +14,7 @@ The optional transcript service lives in `worker/`.
 - **Theater:** player, lower-third flag banner, timeline of checked claims (click a tick to jump to that moment), synced transcript, fact-check feed.
 - **Truth meter** and **Debate mode** (two named speakers, one meter each).
 - **Red flags:** emotional triggers, too-good-to-be-true language, and out-of-context clues (says "today" on an old upload; title does not match what is said), at video level and tagged on individual claims.
+- **Live capture:** "Capture tab audio" transcribes a tab's audio (for live streams) through Deepgram, with the key kept in the worker.
 - **Demo:** "Run demo" plays scripted sample claims. They are not real checks.
 
 ## How a claim is checked
@@ -22,16 +23,18 @@ The optional transcript service lives in `worker/`.
 3. **Tier 2, related reporting.** If no fact-checker matched and you set a search engine ID, Veritas searches Reuters, BBC, WSJ news, FT, The Economist, PBS NewsHour, Christian Science Monitor, DW, NewsNation and AP, and shows links with third-party bias ratings (AllSides, Ad Fontes, MBFC). This is context, not confirmation.
 4. **Otherwise** the claim shows "No match", which does not mean true or false.
 
-## Setup (all optional, in this order)
-**A. Google API key.** In Google Cloud Console create a project, enable **Fact Check Tools API**, **YouTube Data API v3** and **Custom Search API**, create an API key, and restrict it to your site (HTTP referrer `https://YOURNAME.github.io/*`) and to those three APIs. On the site, open **Settings** and paste it. Each visitor uses their own key and quota; it is stored only in their browser. Without a key you can still use the demo, red flags, microphone and text input.
+## Setup
+Follow **GUIDE-CLOUDFLARE.md** (written for a Chromebook, all in the browser). In short:
+1. Enable the Fact Check Tools and YouTube Data APIs, create a Google API key, lock it to your site.
+2. Deploy `worker/transcript-worker.js` on Cloudflare (free). This reads YouTube captions for recorded videos and Shorts, and fetches articles.
+3. Open **Setup & settings** at the bottom of the page, paste the key and the worker address, and press **Test setup**. To enable it for every visitor, put the worker address in `docs/assets/config.js` (`defaults`).
+4. Optional, for live streams: add a Deepgram key to the worker and use **Capture tab audio** (pick the Chrome Tab option and tick "Also share tab audio").
 
-**B. Related-reporting search engine (Tier 2).** At programmablesearchengine.google.com create a search engine that searches only: reuters.com, bbc.com, bbc.co.uk, wsj.com, ft.com, economist.com, pbs.org, csmonitor.com, dw.com, newsnation.com, apnews.com. Copy its **Search engine ID** into Settings.
-
-**C. Transcript service (full captions and articles).** Browsers cannot read YouTube captions or most article pages directly. Follow `worker/README.md` to deploy the free Cloudflare Worker, then paste its address in Settings. Without it, a video is checked from its title and description, and you can use **Listen (mic)** for audio.
+Without any setup you can still use the demo, red flags, **Check text**, and the microphone. Google is retiring the Custom Search API (related-reporting step) on January 1, 2027, so that step is optional and will be replaced.
 
 ## Honest limits
 - YouTube has no official API for other channels' captions. The worker uses an unofficial route that can break and may conflict with YouTube's terms. Check them before public use. It has not been tested against live YouTube from the build environment.
-- Live streams: captions are re-fetched every 20 seconds when available. Otherwise use the microphone.
+- Live streams: captions are re-fetched every 20 seconds when available. Otherwise use Capture tab audio. The microphone only hears the room, not the video.
 - Whether an outlet's live embed plays is up to the broadcaster. Channel IDs are in `docs/assets/config.js`; correct any that show the wrong stream.
 - Matching is by wording, so a similar claim can have a different verdict. Always read the linked fact-check.
 - Automated results can be wrong. Keep the on-page disclaimer.
@@ -43,4 +46,5 @@ The optional transcript service lives in `worker/`.
 - `docs/assets/redflags.js`: red-flag rules
 - `docs/assets/youtube.js`: schedule, Shorts and transcript calls
 - `docs/assets/app.js`: interface
-- `worker/`: optional transcript and article service
+- `worker/`: transcript, article and live-audio token service
+- `GUIDE-CLOUDFLARE.md`: setup walkthrough

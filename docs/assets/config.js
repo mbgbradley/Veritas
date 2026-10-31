@@ -13,6 +13,11 @@ V.config = {
     { id: "aje", name: "Al Jazeera",   type: "yt-channel", ref: "UCNye-wNBqNL5ZzHSJj3l8Bg" }
   ],
 
+  // OPTIONAL: fill these in so every visitor gets lookups without opening Settings.
+  // worker: your Cloudflare Worker address (safe to publish).
+  // key: a Google API key (public once published; restrict it to your site and to Fact Check + YouTube Data APIs).
+  defaults: { worker: "", key: "" },
+
   // Tier 1: established fact-checkers. Order = priority when results disagree.
   checkers: [
     { host: "politifact.com", name: "PolitiFact" },
@@ -60,8 +65,8 @@ V.store = {
   set(k, v) { try { localStorage.setItem('veritas.' + k, JSON.stringify(v)); } catch {} }
 };
 V.settings = {
-  key: V.store.get('key', ''),        // Google API key (Fact Check Tools, YouTube Data, Custom Search)
+  key: V.store.get('key', '') || V.config.defaults.key,        // Google API key (Fact Check Tools, YouTube Data)
   cx: V.store.get('cx', ''),          // Programmable Search Engine ID for the Tier 2 sources
-  worker: V.store.get('worker', '')   // Transcript service URL (see worker/README)
+  worker: V.store.get('worker', '') || V.config.defaults.worker   // Transcript service URL (see GUIDE-CLOUDFLARE.md)
 };
 V.saveSettings = () => { V.store.set('key', V.settings.key); V.store.set('cx', V.settings.cx); V.store.set('worker', V.settings.worker); };

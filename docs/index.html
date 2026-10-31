@@ -24,7 +24,6 @@
   <div class="actions">
     <button class="btn ghost" id="btnDebate" aria-pressed="false">Debate mode</button>
     <button class="btn ghost" id="btnText">Check text</button>
-    <button class="btn ghost" id="btnSettings">Settings</button>
   </div>
 </header>
 
@@ -61,6 +60,7 @@
           <label class="who" id="whoWrap" hidden>Speaking:
             <select id="who"><option value="A">Speaker A</option><option value="B">Speaker B</option></select>
           </label>
+          <button class="btn primary" id="btnTab" aria-pressed="false" title="Share a browser tab's audio to transcribe live streams">Capture tab audio</button>
           <button class="btn" id="btnMic" aria-pressed="false">Listen (mic)</button>
           <button class="btn primary" id="btnDemo">Run demo</button>
           <button class="btn ghost" id="btnClear">Clear</button>
@@ -98,22 +98,23 @@
 
   <div class="panel" id="panelSched">
     <div class="filters" id="schedFilters"></div>
-    <div class="sched" id="schedList"><p class="heads-msg">Add your Google API key in Settings to load live and recent programs.</p></div>
+    <div class="sched" id="schedList"><p class="heads-msg">Add your Google API key in Setup & settings (page footer) to load live and recent programs.</p></div>
   </div>
-  <div class="panel" id="panelTop" hidden><div class="topgrid" id="topGrid"><p class="heads-msg">Add your Google API key in Settings to load stories.</p></div></div>
-  <div class="panel" id="panelShorts" hidden><div class="shorts" id="shortsGrid"><p class="heads-msg">Add your Google API key in Settings to load Shorts. You can also paste any Shorts link in the box at the top.</p></div></div>
+  <div class="panel" id="panelTop" hidden><div class="topgrid" id="topGrid"><p class="heads-msg">Add your Google API key in Setup & settings (page footer) to load stories.</p></div></div>
+  <div class="panel" id="panelShorts" hidden><div class="shorts" id="shortsGrid"><p class="heads-msg">Add your Google API key in Setup & settings (page footer) to load Shorts. You can also paste any Shorts link in the box at the top.</p></div></div>
 </section>
 
-<footer class="foot">Veritas is an independent project and is not affiliated with any broadcaster. Video is embedded from the original platform.</footer>
+<footer class="foot">Veritas is an independent project and is not affiliated with any broadcaster. Video is embedded from the original platform. <button type="button" class="linkbtn" id="btnSettings">Setup &amp; settings</button></footer>
 
 <dialog id="dlgSettings">
   <form method="dialog">
     <h3>Settings</h3>
-    <p class="muted">Saved only in this browser. One Google API key can power everything below: enable <b>Fact Check Tools API</b>, <b>YouTube Data API v3</b> and (optional) <b>Custom Search API</b>, then restrict the key to your site address.</p>
+    <p class="muted">Saved only in this browser. Enable <b>Fact Check Tools API</b> and <b>YouTube Data API v3</b> for your Google key, then restrict the key to your site address. Press <b>Test setup</b> to see what works.</p>
     <label>Google API key<input id="keyInput" type="password" autocomplete="off" placeholder="AIza…"></label>
-    <label>Related-reporting search engine ID (optional)<input id="cxInput" autocomplete="off" placeholder="Programmable Search Engine ID (cx)"></label>
-    <label>Transcript service URL (optional)<input id="workerInput" autocomplete="off" placeholder="https://your-worker.workers.dev"></label>
-    <div class="row"><button class="btn" value="cancel">Cancel</button><button class="btn primary" id="saveKey" value="ok">Save</button></div>
+    <label>Transcript service URL<input id="workerInput" autocomplete="off" placeholder="https://veritas-service.yourname.workers.dev"></label>
+    <label>Related-reporting search engine ID (optional, Google is retiring this API)<input id="cxInput" autocomplete="off" placeholder="Programmable Search Engine ID (cx)"></label>
+    <ul class="selftest" id="selfTest" aria-live="polite"></ul>
+    <div class="row"><button class="btn" value="cancel">Close</button><button class="btn" type="button" id="btnTest">Test setup</button><button class="btn primary" id="saveKey" value="ok">Save</button></div>
   </form>
 </dialog>
 

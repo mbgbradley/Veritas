@@ -105,5 +105,13 @@ V.yt = (() => {
     return j;
   }
 
-  return { parseLink, one, details, feed, shorts, transcript, article };
+  async function deepgramToken() {
+    if (!V.settings.worker) throw new Error('No transcript service set');
+    const r = await fetch(V.settings.worker.replace(/\/$/, '') + '/deepgram-token');
+    const j = await r.json();
+    if (!r.ok || !j.token) throw new Error(j.error || 'Could not get a live-audio token');
+    return j.token;
+  }
+
+  return { parseLink, one, details, feed, shorts, transcript, article, deepgramToken };
 })();

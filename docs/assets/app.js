@@ -88,6 +88,7 @@
   /* ================= SESSION RESET ================= */
   const Q = { items: [], active: 0, max: 3, gen: 0 };
   function reset() {
+    stopTab();
     clearInterval(state.pollTimer); state.pollTimer = null;
     if (state.rec) { try { state.rec.stop(); } catch {} }
     Q.items.length = 0; Q.gen++;
@@ -238,7 +239,7 @@
       setStatus(S.worker ? 'metadata only (no captions found)' : 'metadata only · add a transcript service for full captions');
     }
     state.flags = V.flags.video(meta, transcriptText());
-    if (!S.key) toast('Add a Google API key in Settings to look up fact-checks.');
+    if (!S.key) toast('Add a Google API key in Setup & settings (page footer) to look up fact-checks.');
     schedule();
   }
   function ingestMetadata(meta) {
@@ -292,10 +293,10 @@
     setStatus('text');
     state.flags = V.flags.video({ title, description: '' }, paragraphs.join(' '));
     schedule();
-    if (!S.key) toast('Add a Google API key in Settings to look up fact-checks.');
+    if (!S.key) toast('Add a Google API key in Setup & settings (page footer) to look up fact-checks.');
   }
   async function openArticle(url) {
-    if (!S.worker) { toast('Add a Transcript service URL in Settings to fetch articles, or paste the text into Check text.'); return; }
+    if (!S.worker) { toast('Add a Transcript service URL in Setup & settings (page footer) to fetch articles, or paste the text into Check text.'); return; }
     toast('Fetching article…');
     try { const a = await V.yt.article(url); runDoc(a.paragraphs, a.title || url, a.url); }
     catch (e) { toast('Could not read that page: ' + e.message); }
@@ -474,7 +475,7 @@
   }
   function renderSched() {
     const list = $('#schedList'), fl = $('#schedFilters');
-    if (!S.key) { list.innerHTML = '<p class="heads-msg">Add your Google API key in Settings to load live and recent programs.</p>'; fl.innerHTML = ''; return; }
+    if (!S.key) { list.innerHTML = '<p class="heads-msg">Add your Google API key in Setup & settings (page footer) to load live and recent programs.</p>'; fl.innerHTML = ''; return; }
     if (!state.feed) { list.innerHTML = '<p class="heads-msg">Loading…</p>'; return; }
     const st = [['all', 'All'], ['live', 'Live now'], ['upcoming', 'Coming up'], ['none', 'Recently aired']];
     fl.innerHTML = st.map(([k, l]) => `<button type="button" class="pill${state.sched.status === k ? ' on' : ''}" data-st="${k}">${l}</button>`).join('') +
@@ -497,7 +498,7 @@
   }
   function renderTop() {
     const g = $('#topGrid');
-    if (!S.key) { g.innerHTML = '<p class="heads-msg">Add your Google API key in Settings to load stories.</p>'; return; }
+    if (!S.key) { g.innerHTML = '<p class="heads-msg">Add your Google API key in Setup & settings (page footer) to load stories.</p>'; return; }
     if (!state.feed) { g.innerHTML = '<p class="heads-msg">Loading…</p>'; return; }
     g.innerHTML = '';
     state.outlets.filter(o => o.type === 'yt-channel').forEach(o => {
@@ -517,7 +518,7 @@
   }
   function renderShorts() {
     const g = $('#shortsGrid');
-    if (!S.key) { g.innerHTML = '<p class="heads-msg">Add your Google API key in Settings to load Shorts. You can also paste any Shorts link in the box at the top.</p>'; return; }
+    if (!S.key) { g.innerHTML = '<p class="heads-msg">Add your Google API key in Setup & settings (page footer) to load Shorts. You can also paste any Shorts link in the box at the top.</p>'; return; }
     if (!state.shorts) { g.innerHTML = '<p class="heads-msg">Loading…</p>'; return; }
     g.innerHTML = '';
     if (!state.shorts.length) { g.innerHTML = '<p class="heads-msg">No Shorts found.</p>'; return; }
@@ -575,6 +576,105 @@
     catch { toast('Could not start the microphone.'); }
   }
 
+  /* ================= TAB AUDIO (live streams) ================= */
+  let tab = null;
+  function ingestLive(text, speaker) {
+    document.querySelectorAll('#capBody .empty').forEach(e => e.remove());
+    if (state.mode === 'doc') { reset(); state.mode = 'session'; }
+    if (state.mode === 'video') { makeLine(text, curTime() || 0, speaker); const b = $('#capBody'); b.scrollTop = b.scrollHeight; schedule(); }
+    else liveLine(text, speaker);
+  }
+  function stopTab() {
+    if (!tab) return;
+    const t = tab; tab = null;
+    try { if (t.ws.readyState === 1) t.ws.send(JSON.stringify({ type: 'CloseStream' })); t.ws.close(); } catch {}
+    try { t.proc.disconnect(); t.ctx.close(); } catch {}
+    try { t.stream.getTracks().forEach(x => x.stop()); } catch {}
+    if (interimEl) { interimEl.remove(); interimEl = null; }
+    const btn = $('#btnTab'); btn.textContent = 'Capture tab audio'; btn.setAttribute('aria-pressed', 'false');
+    setStatus('');
+  }
+  async function toggleTab() {
+    if (tab) { stopTab(); return; }
+    if (!S.worker) { toast('Live capture needs the transcript service. Open Setup & settings (page footer) and add its address.'); return; }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) { toast('This browser cannot share tab audio. Use Chrome.'); return; }
+    let token;
+    try { token = await V.yt.deepgramToken(); } catch (e) { toast('Could not start: ' + e.message); return; }
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({ video: { width: 2, height: 2, frameRate: 1 }, audio: true, preferCurrentTab: true, selfBrowserSurface: 'include', systemAudio: 'exclude' });
+    } catch { toast('Sharing was cancelled.'); return; }
+    const at = stream.getAudioTracks();
+    if (!at.length) { stream.getTracks().forEach(x => x.stop()); toast('No audio was shared. Choose the Chrome Tab option and tick "Also share tab audio".'); return; }
+    const ctx = new AudioContext({ sampleRate: 16000 });
+    const src = ctx.createMediaStreamSource(new MediaStream(at));
+    const proc = ctx.createScriptProcessor(4096, 1, 1);
+    const mute = ctx.createGain(); mute.gain.value = 0;
+    const params = ['encoding=linear16', 'sample_rate=16000', 'channels=1', 'model=nova-2', 'language=en-US', 'punctuate=true', 'interim_results=true', 'utterance_end_ms=1500', 'smart_format=true', 'diarize=true'].join('&');
+    const ws = new WebSocket('wss://api.deepgram.com/v1/listen?' + params, ['bearer', token]);
+    tab = { stream, ctx, proc, ws };
+    let buf = '', spk = 'A';
+    const flush = () => {
+      const text = buf.trim(); buf = '';
+      if (interimEl) { interimEl.remove(); interimEl = null; }
+      if (text) splitSentences(text).forEach(s => ingestLive(s, spk));
+    };
+    ws.onopen = () => {
+      proc.onaudioprocess = e => {
+        if (ws.readyState !== 1) return;
+        const f = e.inputBuffer.getChannelData(0), i16 = new Int16Array(f.length);
+        for (let i = 0; i < f.length; i++) i16[i] = Math.max(-32768, Math.min(32767, f[i] * 32768));
+        ws.send(i16.buffer);
+      };
+      src.connect(proc); proc.connect(mute); mute.connect(ctx.destination);
+      const btn = $('#btnTab'); btn.textContent = 'Stop capture'; btn.setAttribute('aria-pressed', 'true');
+      setStatus('tab audio · live'); toast('Listening to the shared tab.');
+    };
+    ws.onmessage = ev => {
+      let d; try { d = JSON.parse(ev.data); } catch { return; }
+      if (d.type === 'UtteranceEnd') { flush(); return; }
+      const alt = d.channel && d.channel.alternatives && d.channel.alternatives[0];
+      if (!alt || !alt.transcript) return;
+      const w0 = alt.words && alt.words[0]; if (w0 && w0.speaker != null) spk = w0.speaker === 1 ? 'B' : 'A';
+      const text = alt.transcript.trim(); if (!text) return;
+      if (d.is_final) { buf += (buf ? ' ' : '') + text; if (d.speech_final) flush(); }
+      else {
+        if (!interimEl) { document.querySelectorAll('#capBody .empty').forEach(e => e.remove()); interimEl = document.createElement('p'); interimEl.className = 'line interim'; interimEl.innerHTML = '<span class="sp"></span><span class="tx"></span>'; $('#capBody').appendChild(interimEl); }
+        interimEl.querySelector('.tx').textContent = (buf ? buf + ' ' : '') + text; const b = $('#capBody'); b.scrollTop = b.scrollHeight;
+      }
+    };
+    ws.onerror = () => toast('Live transcription connection problem.');
+    ws.onclose = () => { if (tab && tab.ws === ws) { toast('Live transcription stopped.'); stopTab(); } };
+    at[0].addEventListener('ended', () => { if (tab && tab.stream === stream) stopTab(); });
+  }
+
+  /* ================= SETUP SELF-TEST ================= */
+  async function selfTest() {
+    const out = $('#selfTest'); out.innerHTML = '';
+    const key = $('#keyInput').value.trim(), worker = $('#workerInput').value.trim().replace(/\/$/, '');
+    const add = (cls, msg) => { const li = document.createElement('li'); li.className = cls; li.textContent = (cls === 'ok' ? '✓ ' : cls === 'bad' ? '✗ ' : '! ') + msg; out.appendChild(li); };
+    const get = async u => { const r = await fetch(u); let j = {}; try { j = await r.json(); } catch {} return { r, j }; };
+    const errMsg = (r, j) => (j.error && (j.error.message || j.error)) || ('status ' + r.status);
+    if (!key) add('bad', 'No Google API key entered.');
+    else {
+      try { const { r, j } = await get(`https://factchecktools.googleapis.com/v1alpha1/claims:search?query=vaccines&pageSize=1&key=${encodeURIComponent(key)}`); r.ok ? add('ok', 'Fact Check Tools API works') : add('bad', 'Fact Check Tools API: ' + errMsg(r, j)); } catch (e) { add('bad', 'Fact Check Tools API: ' + e.message); }
+      try { const { r, j } = await get(`https://www.googleapis.com/youtube/v3/videos?part=id&id=dQw4w9WgXcQ&key=${encodeURIComponent(key)}`); r.ok ? add('ok', 'YouTube Data API works') : add('bad', 'YouTube Data API: ' + errMsg(r, j)); } catch (e) { add('bad', 'YouTube Data API: ' + e.message); }
+    }
+    if (!worker) add('bad', 'No transcript service address entered.');
+    else {
+      try {
+        const { r, j } = await get(worker + '/');
+        if (!r.ok || !j.ok) add('bad', 'Transcript service: ' + errMsg(r, j));
+        else {
+          add('ok', 'Transcript service is running');
+          add(j.deepgram ? 'ok' : 'warn', j.deepgram ? 'Live tab-audio key is set' : 'Live tab-audio key (DEEPGRAM_API_KEY) is not set, needed only for live capture');
+          const t = await get(worker + '/transcript?v=dQw4w9WgXcQ');
+          t.r.ok && t.j.segments ? add('ok', `Captions work (${t.j.segments.length} lines read${t.j.via ? ' via ' + t.j.via : ''})`) : add('bad', 'Captions: ' + errMsg(t.r, t.j));
+        }
+      } catch (e) { add('bad', 'Transcript service: ' + e.message + ' (check the address and ALLOWED_ORIGIN)'); }
+    }
+  }
+
   /* ================= WIRING ================= */
   function syncSeg() { document.querySelectorAll('.seg button').forEach(b => b.classList.toggle('on', b.dataset.f === state.filter)); }
 
@@ -593,11 +693,13 @@
   $('#btnDemo').addEventListener('click', runDemo);
   $('#btnClear').addEventListener('click', () => { reset(); });
   $('#btnMic').addEventListener('click', toggleMic);
+  $('#btnTab').addEventListener('click', toggleTab);
+  $('#btnTest').addEventListener('click', selfTest);
   document.querySelectorAll('.seg button').forEach(b => b.addEventListener('click', () => { state.filter = b.dataset.f; syncSeg(); renderCards(); }));
   document.querySelectorAll('.tabs [role=tab]').forEach(b => b.addEventListener('click', () => setTab(b.dataset.tab)));
   $('#btnRefresh').addEventListener('click', () => loadBrowse(true));
 
-  $('#btnSettings').addEventListener('click', () => { $('#keyInput').value = S.key; $('#cxInput').value = S.cx; $('#workerInput').value = S.worker; $('#dlgSettings').showModal(); });
+  $('#btnSettings').addEventListener('click', () => { $('#selfTest').innerHTML = ''; $('#keyInput').value = S.key; $('#cxInput').value = S.cx; $('#workerInput').value = S.worker; $('#dlgSettings').showModal(); });
   $('#saveKey').addEventListener('click', () => {
     S.key = $('#keyInput').value.trim(); S.cx = $('#cxInput').value.trim(); S.worker = $('#workerInput').value.trim(); V.saveSettings();
     toast('Saved in this browser.'); state.feed = null; state.shorts = null; loadBrowse(true);
