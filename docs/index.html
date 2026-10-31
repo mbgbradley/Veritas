@@ -60,7 +60,8 @@
           <label class="who" id="whoWrap" hidden>Speaking:
             <select id="who"><option value="A">Speaker A</option><option value="B">Speaker B</option></select>
           </label>
-          <button class="btn primary" id="btnTab" aria-pressed="false" title="Share a browser tab's audio to transcribe live streams">Capture tab audio</button>
+          <button class="btn primary" id="btnLocal" aria-pressed="false" title="Free: share any tab's audio and transcribe it on this device. Works for any site; a few seconds behind.">Tab audio: free</button>
+          <button class="btn" id="btnTab" aria-pressed="false" title="Faster and more accurate. Uses Deepgram through your transcript service.">Tab audio: cloud</button>
           <button class="btn" id="btnMic" aria-pressed="false">Listen (mic)</button>
           <button class="btn primary" id="btnDemo">Run demo</button>
           <button class="btn ghost" id="btnClear">Clear</button>
@@ -112,6 +113,9 @@
     <p class="muted">Saved only in this browser. Enable <b>Fact Check Tools API</b> and <b>YouTube Data API v3</b> for your Google key, then restrict the key to your site address. Press <b>Test setup</b> to see what works.</p>
     <label>Google API key<input id="keyInput" type="password" autocomplete="off" placeholder="AIza…"></label>
     <label>Transcript service URL<input id="workerInput" autocomplete="off" placeholder="https://veritas-service.yourname.workers.dev"></label>
+    <label>Free-mode speech model
+      <select id="modelInput"><option value="onnx-community/whisper-tiny.en">Fast: tiny (smaller download, more mistakes)</option><option value="onnx-community/whisper-base.en">Better: base (larger download, slower)</option></select>
+    </label>
     <label>Related-reporting search engine ID (optional, Google is retiring this API)<input id="cxInput" autocomplete="off" placeholder="Programmable Search Engine ID (cx)"></label>
     <ul class="selftest" id="selfTest" aria-live="polite"></ul>
     <div class="row"><button class="btn" value="cancel">Close</button><button class="btn" type="button" id="btnTest">Test setup</button><button class="btn primary" id="saveKey" value="ok">Save</button></div>

@@ -14,6 +14,7 @@ The optional transcript service lives in `worker/`.
 - **Theater:** player, lower-third flag banner, timeline of checked claims (click a tick to jump to that moment), synced transcript, fact-check feed.
 - **Truth meter** and **Debate mode** (two named speakers, one meter each).
 - **Red flags:** emotional triggers, too-good-to-be-true language, and out-of-context clues (says "today" on an old upload; title does not match what is said), at video level and tagged on individual claims.
+- **Free mode:** "Tab audio: free" transcribes any tab's audio on your own device with an open-source speech model (Whisper), from any website, with no accounts. A few seconds behind, less accurate than the cloud option.
 - **Live capture:** "Capture tab audio" transcribes a tab's audio (for live streams) through Deepgram, with the key kept in the worker.
 - **Demo:** "Run demo" plays scripted sample claims. They are not real checks.
 
@@ -26,7 +27,7 @@ The optional transcript service lives in `worker/`.
 ## Setup
 Follow **GUIDE-CLOUDFLARE.md** (written for a Chromebook, all in the browser). In short:
 1. Enable the Fact Check Tools and YouTube Data APIs, create a Google API key, lock it to your site.
-2. Deploy `worker/transcript-worker.js` on Cloudflare (free). This reads YouTube captions for recorded videos and Shorts, and fetches articles.
+2. Deploy `worker/transcript-worker.js` on Cloudflare (free). This reads captions for recorded videos and Shorts, and fetches articles. Because YouTube often blocks Cloudflare's servers, add a hosted caption provider key (`SUPADATA_API_KEY`, guide step 2b).
 3. Open **Setup & settings** at the bottom of the page, paste the key and the worker address, and press **Test setup**. To enable it for every visitor, put the worker address in `docs/assets/config.js` (`defaults`).
 4. Optional, for live streams: add a Deepgram key to the worker and use **Capture tab audio** (pick the Chrome Tab option and tick "Also share tab audio").
 
@@ -46,5 +47,6 @@ Without any setup you can still use the demo, red flags, **Check text**, and the
 - `docs/assets/redflags.js`: red-flag rules
 - `docs/assets/youtube.js`: schedule, Shorts and transcript calls
 - `docs/assets/app.js`: interface
+- `docs/assets/whisper-worker.js`: on-device speech model for free mode
 - `worker/`: transcript, article and live-audio token service
 - `GUIDE-CLOUDFLARE.md`: setup walkthrough

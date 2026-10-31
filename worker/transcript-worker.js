@@ -6,6 +6,8 @@
 //   GET /deepgram-token          -> short-lived key so the browser can stream tab audio to Deepgram
 //
 // Settings (Worker > Settings > Variables and Secrets):
+//   SUPADATA_API_KEY  (Secret)  recommended: a hosted transcript provider. YouTube often blocks Cloudflare's
+//                               servers, so reading captions directly can fail; this route avoids that.
 //   DEEPGRAM_API_KEY  (Secret)  needed only for live tab-audio capture
 //   ALLOWED_ORIGIN    (Text)    your site, e.g. https://yourname.github.io  (recommended)
 //
@@ -31,10 +33,10 @@ export default {
     // When ALLOWED_ORIGIN is set, refuse browser calls from any other site.
     if (allowed !== '*' && origin && origin !== allowed) return json({ error: 'Origin not allowed' }, cors, 0, 403);
     try {
-      if (url.pathname === '/transcript') return json(await transcript(url.searchParams.get('v')), cors, 60);
+      if (url.pathname === '/transcript') return json(await transcript(url.searchParams.get('v'), env), cors, 60);
       if (url.pathname === '/article') return json(await article(url.searchParams.get('url')), cors, 300);
       if (url.pathname === '/deepgram-token') return json(await deepgramToken(env), cors, 0);
-      return json({ ok: true, deepgram: !!env.DEEPGRAM_API_KEY, originLocked: allowed !== '*', routes: ['/transcript?v=', '/article?url=', '/deepgram-token'] }, cors, 0);
+      return json({ ok: true, deepgram: !!env.DEEPGRAM_API_KEY, supadata: !!env.SUPADATA_API_KEY, originLocked: allowed !== '*', routes: ['/transcript?v=', '/article?url=', '/deepgram-token'] }, cors, 0);
     } catch (e) {
       return json({ error: String((e && e.message) || e) }, cors, 0, 502);
     }
@@ -62,17 +64,36 @@ async function deepgramToken(env) {
 }
 
 /* ---------- YouTube captions ---------- */
-async function transcript(id) {
+async function transcript(id, env) {
   if (!/^[\w-]{11}$/.test(id || '')) throw new Error('Bad video id');
   const errors = [];
-  for (const way of [viaAndroid, viaWatchPage]) {
+  // The hosted provider goes first when configured, because direct access from Cloudflare is often blocked.
+  const ways = [];
+  if (env && env.SUPADATA_API_KEY) ways.push(() => viaSupadata(id, env.SUPADATA_API_KEY));
+  ways.push(() => viaAndroid(id), () => viaWatchPage(id));
+  const names = [env && env.SUPADATA_API_KEY ? 'supadata' : null, 'android', 'watch-page'].filter(Boolean);
+  for (let i = 0; i < ways.length; i++) {
     try {
-      const out = await way(id);
+      const out = await ways[i]();
       if (out && out.segments && out.segments.length) return out;
-      errors.push(way.name + ': no caption text');
-    } catch (e) { errors.push(way.name + ': ' + (e.message || e)); }
+      errors.push(names[i] + ': no caption text');
+    } catch (e) { errors.push(names[i] + ': ' + (e.message || e)); }
   }
-  throw new Error('No captions could be read (' + errors.join('; ') + ')');
+  throw new Error('No captions could be read (' + errors.join('; ') + ')' + (env && env.SUPADATA_API_KEY ? '' : '. Tip: add SUPADATA_API_KEY to the worker, see GUIDE-CLOUDFLARE.md'));
+}
+
+async function viaSupadata(id, apiKey) {
+  const target = 'https://www.youtube.com/watch?v=' + id;
+  const r = await fetch('https://api.supadata.ai/v1/transcript?url=' + encodeURIComponent(target) + '&mode=native', { headers: { 'x-api-key': apiKey } });
+  const j = await r.json().catch(() => ({}));
+  if (r.status === 206) throw new Error('this video has no captions');
+  if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + (j.message || j.error || '').toString().slice(0, 100));
+  const list = Array.isArray(j.content) ? j.content : [];
+  const segments = list.map(c => ({
+    start: (c.offset || 0) / 1000, dur: (c.duration || 0) / 1000,
+    text: String(c.text || '').replace(/\s+/g, ' ').trim()
+  })).filter(s => s.text);
+  return { videoId: id, via: 'supadata', language: j.lang || 'en', auto: false, title: '', live: false, segments };
 }
 
 async function viaAndroid(id) {
@@ -81,7 +102,9 @@ async function viaAndroid(id) {
     headers: { 'content-type': 'application/json', 'user-agent': 'com.google.android.youtube/19.09.37 (Linux; U; Android 13) gzip' },
     body: JSON.stringify({ context: { client: { clientName: 'ANDROID', clientVersion: '19.09.37', androidSdkVersion: 33, hl: 'en', gl: 'US' } }, videoId: id })
   });
-  return fromPlayer(id, await r.json(), 'android');
+  const raw = await r.text();
+  let d; try { d = JSON.parse(raw); } catch { throw new Error('HTTP ' + r.status + ', not JSON: ' + raw.replace(/\s+/g, ' ').slice(0, 70)); }
+  return fromPlayer(id, d, 'android');
 }
 
 async function viaWatchPage(id) {
@@ -89,6 +112,7 @@ async function viaWatchPage(id) {
     headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36', 'accept-language': 'en-US,en;q=0.9', cookie: 'CONSENT=YES+1; SOCS=CAI' }
   });
   const html = await r.text();
+  if (/unusual traffic|confirm you.{0,10}not a bot|consent\.youtube/i.test(html)) throw new Error('YouTube is blocking this server (HTTP ' + r.status + ')');
   const m = html.match(/ytInitialPlayerResponse\s*=\s*(\{[\s\S]*?\})\s*;\s*(?:var\s|<\/script>)/);
   if (!m) throw new Error('player data not found');
   return fromPlayer(id, JSON.parse(m[1]), 'watch-page');

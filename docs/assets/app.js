@@ -88,7 +88,7 @@
   /* ================= SESSION RESET ================= */
   const Q = { items: [], active: 0, max: 3, gen: 0 };
   function reset() {
-    stopTab();
+    stopTab(); stopLocal();
     clearInterval(state.pollTimer); state.pollTimer = null;
     if (state.rec) { try { state.rec.stop(); } catch {} }
     Q.items.length = 0; Q.gen++;
@@ -578,11 +578,11 @@
 
   /* ================= TAB AUDIO (live streams) ================= */
   let tab = null;
-  function ingestLive(text, speaker) {
+  function ingestLive(text, speaker, t) {
     document.querySelectorAll('#capBody .empty').forEach(e => e.remove());
     if (state.mode === 'doc') { reset(); state.mode = 'session'; }
-    if (state.mode === 'video') { makeLine(text, curTime() || 0, speaker); const b = $('#capBody'); b.scrollTop = b.scrollHeight; schedule(); }
-    else liveLine(text, speaker);
+    if (state.mode === 'video') { makeLine(text, t != null ? Math.max(0, t) : (curTime() || 0), speaker); const b = $('#capBody'); b.scrollTop = b.scrollHeight; schedule(); }
+    else { ensureSession(); makeLine(text, t != null ? Math.max(0, t) : sessionT(), speaker); const b = $('#capBody'); b.scrollTop = b.scrollHeight; schedule(); }
   }
   function stopTab() {
     if (!tab) return;
@@ -596,6 +596,7 @@
   }
   async function toggleTab() {
     if (tab) { stopTab(); return; }
+    stopLocal();
     if (!S.worker) { toast('Live capture needs the transcript service. Open Setup & settings (page footer) and add its address.'); return; }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) { toast('This browser cannot share tab audio. Use Chrome.'); return; }
     let token;
@@ -648,6 +649,102 @@
     at[0].addEventListener('ended', () => { if (tab && tab.stream === stream) stopTab(); });
   }
 
+  /* ================= FREE MODE: on-device speech model ================= */
+  const LOCAL_LABEL = 'Tab audio: free';
+  let local = null, lw = null, lwReady = null, lwModel = '', lwFiles = {}, dropped = 0;
+  function killLocalWorker() { if (lw) { lw.terminate(); lw = null; lwReady = null; } }
+  function ensureWorker() {
+    if (lw && lwModel === S.localModel) return lwReady;
+    killLocalWorker(); lwModel = S.localModel; lwFiles = {};
+    lw = new Worker('assets/whisper-worker.js', { type: 'module' });
+    lwReady = new Promise((resolve, reject) => {
+      lw.onmessage = e => {
+        const m = e.data;
+        if (m.type === 'progress') {
+          const p = m.p || {};
+          if (p.status === 'progress' && p.total) {
+            lwFiles[p.file] = { l: p.loaded, t: p.total };
+            const l = Object.values(lwFiles).reduce((a, f) => a + f.l, 0), t = Object.values(lwFiles).reduce((a, f) => a + f.t, 0);
+            setStatus('downloading speech model ' + Math.round(l / t * 100) + '%');
+          }
+        } else if (m.type === 'ready') { setStatus('free mode \u00B7 model ready (' + m.device + ')'); resolve(m.device); }
+        else if (m.type === 'result') onLocalResult(m);
+        else if (m.type === 'error') { toast('Speech model: ' + m.message); reject(new Error(m.message)); }
+      };
+      lw.onerror = ev => reject(new Error(ev.message || 'the model worker could not start'));
+      lw.postMessage({ type: 'load', model: S.localModel });
+    });
+    return lwReady;
+  }
+  const HALLUCINATION = /^\s*(\[[^\]]*\]|\([^)]*\)|thank you\.?|thanks for watching\.?|thanks\.?|you\.?|bye\.?|\.+)\s*$/i;
+  function onLocalResult(m) {
+    if (!local) return;
+    const rec = local.pend.get(m.id); local.pend.delete(m.id);
+    setStatus('free mode' + (local.pend.size ? ' \u00B7 ' + local.pend.size + ' queued' : '') + (dropped ? ' \u00B7 skipped ' + dropped : ''));
+    const text = (m.text || '').replace(/\s+/g, ' ').trim();
+    if (!rec || !text || HALLUCINATION.test(text)) return;
+    splitSentences(text).forEach(s => ingestLive(s, 'A', rec.t));
+  }
+  function stopLocal() {
+    if (!local) return;
+    const L = local; local = null;
+    try { L.proc.disconnect(); L.ctx.close(); } catch {}
+    try { L.stream.getTracks().forEach(x => x.stop()); } catch {}
+    const btn = $('#btnLocal'); btn.textContent = LOCAL_LABEL; btn.setAttribute('aria-pressed', 'false'); btn.disabled = false;
+    setStatus('');
+  }
+  async function toggleLocal() {
+    if (local) { stopLocal(); return; }
+    const btn = $('#btnLocal');
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) { toast('This browser cannot share tab audio. Use Chrome.'); return; }
+    if (!window.Worker) { toast('This browser cannot run the on-device model.'); return; }
+    stopTab();
+    if (state.mode === 'doc') { reset(); state.mode = 'session'; }
+    btn.disabled = true; btn.textContent = 'Loading model\u2026';
+    toast('First use downloads the speech model once (tens of MB). Keep this tab open.');
+    try { await ensureWorker(); }
+    catch (e) { btn.disabled = false; btn.textContent = LOCAL_LABEL; killLocalWorker(); setStatus(''); toast('Could not load the speech model: ' + e.message + '. It needs access to cdn.jsdelivr.net and huggingface.co.'); return; }
+    let stream;
+    try { stream = await navigator.mediaDevices.getDisplayMedia({ video: { width: 2, height: 2, frameRate: 1 }, audio: true, systemAudio: 'exclude' }); }
+    catch { btn.disabled = false; btn.textContent = LOCAL_LABEL; toast('Sharing was cancelled.'); return; }
+    const at = stream.getAudioTracks();
+    if (!at.length) { stream.getTracks().forEach(x => x.stop()); btn.disabled = false; btn.textContent = LOCAL_LABEL; toast('No audio was shared. Choose the Chrome Tab option, pick the tab with the video, and tick "Also share tab audio".'); return; }
+    const cfgL = V.config.local;
+    const ctx = new AudioContext({ sampleRate: 16000 });
+    const src = ctx.createMediaStreamSource(new MediaStream(at));
+    const proc = ctx.createScriptProcessor(4096, 1, 1);
+    const mute = ctx.createGain(); mute.gain.value = 0;
+    const L = local = { stream, ctx, proc, buf: [], len: 0, quiet: 0, voiced: false, pend: new Map(), seq: 0 };
+    dropped = 0; ensureSession();
+    const nowT = () => state.mode === 'video' ? (curTime() || 0) : sessionT();
+    const flush = () => {
+      const secs = L.len / 16000, had = L.voiced, parts = L.buf;
+      L.buf = []; L.len = 0; L.quiet = 0; L.voiced = false;
+      if (!had) return;
+      if (L.pend.size >= cfgL.maxQueue) { dropped++; setStatus('free mode \u00B7 device too slow, skipped ' + dropped + ' (try cloud mode)'); return; }
+      const audio = new Float32Array(Math.round(secs * 16000)); let o = 0;
+      parts.forEach(p => { audio.set(p, o); o += p.length; });
+      const id = ++L.seq; L.pend.set(id, { t: nowT() - secs });
+      lw.postMessage({ type: 'run', id, audio }, [audio.buffer]);
+      setStatus('free mode \u00B7 ' + L.pend.size + ' queued');
+    };
+    proc.onaudioprocess = e => {
+      if (local !== L) return;
+      const f = new Float32Array(e.inputBuffer.getChannelData(0));
+      let s = 0; for (let i = 0; i < f.length; i++) s += f[i] * f[i];
+      const quiet = Math.sqrt(s / f.length) < cfgL.quietRms;
+      L.buf.push(f); L.len += f.length;
+      if (quiet) L.quiet++; else { L.voiced = true; L.quiet = 0; }
+      const secs = L.len / 16000;
+      if ((secs >= cfgL.minSec && L.quiet >= 2) || secs >= cfgL.maxSec) flush();
+      else if (!L.voiced && secs >= 2) { L.buf = []; L.len = 0; L.quiet = 0; }
+    };
+    src.connect(proc); proc.connect(mute); mute.connect(ctx.destination);
+    btn.disabled = false; btn.textContent = 'Stop free capture'; btn.setAttribute('aria-pressed', 'true');
+    setStatus('free mode \u00B7 listening'); toast('Listening to the shared tab. Text appears a few seconds after it is spoken.');
+    at[0].addEventListener('ended', () => { if (local === L) stopLocal(); });
+  }
+
   /* ================= SETUP SELF-TEST ================= */
   async function selfTest() {
     const out = $('#selfTest'); out.innerHTML = '';
@@ -667,6 +764,7 @@
         if (!r.ok || !j.ok) add('bad', 'Transcript service: ' + errMsg(r, j));
         else {
           add('ok', 'Transcript service is running');
+          add(j.supadata ? 'ok' : 'warn', j.supadata ? 'Hosted caption provider key is set' : 'Hosted caption provider key (SUPADATA_API_KEY) is not set. Recommended: YouTube often blocks direct caption access');
           add(j.deepgram ? 'ok' : 'warn', j.deepgram ? 'Live tab-audio key is set' : 'Live tab-audio key (DEEPGRAM_API_KEY) is not set, needed only for live capture');
           const t = await get(worker + '/transcript?v=dQw4w9WgXcQ');
           t.r.ok && t.j.segments ? add('ok', `Captions work (${t.j.segments.length} lines read${t.j.via ? ' via ' + t.j.via : ''})`) : add('bad', 'Captions: ' + errMsg(t.r, t.j));
@@ -694,14 +792,17 @@
   $('#btnClear').addEventListener('click', () => { reset(); });
   $('#btnMic').addEventListener('click', toggleMic);
   $('#btnTab').addEventListener('click', toggleTab);
+  $('#btnLocal').addEventListener('click', toggleLocal);
   $('#btnTest').addEventListener('click', selfTest);
   document.querySelectorAll('.seg button').forEach(b => b.addEventListener('click', () => { state.filter = b.dataset.f; syncSeg(); renderCards(); }));
   document.querySelectorAll('.tabs [role=tab]').forEach(b => b.addEventListener('click', () => setTab(b.dataset.tab)));
   $('#btnRefresh').addEventListener('click', () => loadBrowse(true));
 
-  $('#btnSettings').addEventListener('click', () => { $('#selfTest').innerHTML = ''; $('#keyInput').value = S.key; $('#cxInput').value = S.cx; $('#workerInput').value = S.worker; $('#dlgSettings').showModal(); });
+  $('#btnSettings').addEventListener('click', () => { $('#selfTest').innerHTML = ''; $('#keyInput').value = S.key; $('#cxInput').value = S.cx; $('#modelInput').value = S.localModel; $('#workerInput').value = S.worker; $('#dlgSettings').showModal(); });
   $('#saveKey').addEventListener('click', () => {
-    S.key = $('#keyInput').value.trim(); S.cx = $('#cxInput').value.trim(); S.worker = $('#workerInput').value.trim(); V.saveSettings();
+    S.key = $('#keyInput').value.trim(); S.cx = $('#cxInput').value.trim(); S.worker = $('#workerInput').value.trim();
+    const mdl = $('#modelInput').value; if (mdl !== S.localModel) { S.localModel = mdl; stopLocal(); killLocalWorker(); }
+    V.saveSettings();
     toast('Saved in this browser.'); state.feed = null; state.shorts = null; loadBrowse(true);
   });
   $('#btnText').addEventListener('click', () => $('#dlgText').showModal());

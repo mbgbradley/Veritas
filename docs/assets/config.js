@@ -64,9 +64,11 @@ V.store = {
   get(k, d) { try { const v = localStorage.getItem('veritas.' + k); return v ? JSON.parse(v) : d; } catch { return d; } },
   set(k, v) { try { localStorage.setItem('veritas.' + k, JSON.stringify(v)); } catch {} }
 };
+V.config.local = { minSec: 5, maxSec: 14, quietRms: 0.008, maxQueue: 3 };   // free-mode chunking
 V.settings = {
+  localModel: V.store.get('localModel', '') || 'onnx-community/whisper-tiny.en',
   key: V.store.get('key', '') || V.config.defaults.key,        // Google API key (Fact Check Tools, YouTube Data)
   cx: V.store.get('cx', ''),          // Programmable Search Engine ID for the Tier 2 sources
   worker: V.store.get('worker', '') || V.config.defaults.worker   // Transcript service URL (see GUIDE-CLOUDFLARE.md)
 };
-V.saveSettings = () => { V.store.set('key', V.settings.key); V.store.set('cx', V.settings.cx); V.store.set('worker', V.settings.worker); };
+V.saveSettings = () => { V.store.set('localModel', V.settings.localModel); V.store.set('key', V.settings.key); V.store.set('cx', V.settings.cx); V.store.set('worker', V.settings.worker); };
