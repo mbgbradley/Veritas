@@ -57,7 +57,7 @@
   const originParam = () => /^https?:$/.test(location.protocol) ? '&origin=' + encodeURIComponent(location.origin) : '';
   function embedUrl(o) {
     if (o.type === 'yt-channel') return `https://www.youtube.com/embed/live_stream?channel=${encodeURIComponent(o.ref)}&rel=0&enablejsapi=1` + originParam();
-    if (o.type === 'yt-video') return `https://www.youtube.com/embed/${encodeURIComponent(o.ref)}?rel=0&playsinline=1&enablejsapi=1` + originParam();
+    if (o.type === 'yt-video') return `https://www.youtube.com/embed/${encodeURIComponent(o.ref)}?rel=0&playsinline=1&enablejsapi=1${o.autoplay ? '&autoplay=1' : ''}` + originParam();
     if (o.type === 'twitch') return `https://player.twitch.tv/?channel=${encodeURIComponent(o.ref)}&parent=${encodeURIComponent(location.hostname || 'localhost')}&autoplay=false`;
     return 'about:blank';
   }
@@ -93,7 +93,8 @@
     if (state.rec) { try { state.rec.stop(); } catch {} }
     Q.items.length = 0; Q.gen++;
     state.cards = []; state.lines = []; state.seen = new Set(); state.flags = null; state.t0 = null;
-    state.lastSegEnd = -1; state.docCount = 0; state.lastT = 0; state.activeLine = -1; cardSeq = 0; interimEl = null;
+    state.lastSegEnd = -1; state.docCount = 0; state.lastT = 0; state.activeLine = -1; cardSeq = 0; interimEl = null; state.newestFirst = false; liveCount = 0;
+    V.checker.resetBudget(); hideBanner();
     state.timers.forEach(clearTimeout); state.timers = [];
     $('#lower').hidden = true; $('#capBody').innerHTML = EMPTY; setStatus('');
     schedule();
@@ -115,7 +116,7 @@
   async function run(c) {
     const g = Q.gen;
     try {
-      const r = await V.checker.check(c.text);
+      const r = await V.checker.check(c.text, ctxFor(c));
       if (g !== Q.gen) return;
       resolve(c, r.verdict, r.detail, r.sources);
     } catch (e) {
@@ -123,11 +124,15 @@
       resolve(c, 'NOMATCH', 'Lookup failed: ' + esc(e.message), []); errOnce(e.message);
     }
   }
+  function ctxFor(c) {
+    const i = c.line ? state.lines.indexOf(c.line) : -1, prev = i > 0 ? state.lines[i - 1].text : '';
+    const title = state.video && state.video.title ? 'Video: ' + state.video.title + (state.video.channel ? ' (' + state.video.channel + ')' : '') + '. ' : '';
+    return (title + (prev ? 'Previous line: ' + prev : '')).slice(0, 700);
+  }
   function resolve(c, verdict, detail, sources) {
     c.verdict = verdict; c.detail = detail || ''; c.sources = sources || [];
     if (c.line) renderLine(c.line);
-    if ((verdict === 'FALSE' || verdict === 'MISLEADING') && state.mode !== 'video') showLower(c);
-    if ((verdict === 'FALSE' || verdict === 'MISLEADING') && state.mode === 'video' && state.live) showLower(c);
+    if ((verdict === 'FALSE' || verdict === 'MISLEADING') && (state.mode !== 'video' || state.live || state.newestFirst)) showLower(c);
     schedule();
   }
 
@@ -161,7 +166,7 @@
       const c = newCard(s, speaker, t, L); L.cards[s] = c; enqueue(c);
     });
     renderLine(L);
-    (frag || $('#capBody')).appendChild(el);
+    if (frag) frag.appendChild(el); else placeLine(el);
     return L;
   }
   function ensureSession() {
@@ -170,7 +175,7 @@
   const sessionT = () => state.t0 ? (Date.now() - state.t0) / 1000 : 0;
   function liveLine(text, speaker) {
     ensureSession(); makeLine(text, sessionT(), speaker);
-    const b = $('#capBody'); b.scrollTop = b.scrollHeight; schedule();
+    scrollLatest(); schedule();
   }
 
   /* captions -> chunks of about a sentence, keeping start times */
@@ -212,10 +217,14 @@
     $('#playerBox').classList.toggle('vertical', state.short);
     $('#liveBadge').hidden = !state.live;
     $('#nowPlaying').textContent = m.title || 'Video';
-    setFrame({ type: 'yt-video', ref: m.id });
+    setFrame({ type: 'yt-video', ref: m.id, autoplay: true });
     $('#stage').scrollIntoView({ behavior: 'smooth', block: 'start' });
-    $('#capBody').innerHTML = '<p class="empty">Reading captions…</p>';
-    setStatus('loading');
+    $('#capBody').innerHTML = '<p class="empty">Starting…</p>';
+    setStatus('starting');
+    // With no reliable captions source, listen to the tab right now. This must happen inside the click so Chrome allows it.
+    const captionsExpected = !!S.worker && (!V.info || V.info.supadata);
+    let audio = null;
+    if (!captionsExpected) audio = startAudio(true, true);
     let meta = m;
     if (S.key && !m.description) { try { meta = (await V.yt.one(m.id)) || m; } catch {} }
     if (my !== state.openSeq) return;
@@ -224,22 +233,28 @@
     if (meta.status === 'live') { state.live = true; $('#liveBadge').hidden = false; }
 
     let segs = null, auto = false;
-    if (S.worker) {
-      try { const tr = await V.yt.transcript(m.id); segs = tr.segments; auto = tr.auto; if (tr.live) state.live = true; }
-      catch (e) { toast('Captions unavailable: ' + e.message); }
+    if (captionsExpected) {
+      try {
+        const tr = await Promise.race([V.yt.transcript(m.id), new Promise((_, rej) => setTimeout(() => rej(new Error('timed out')), 7000))]);
+        segs = tr.segments; auto = tr.auto; if (tr.live) state.live = true;
+      } catch (e) { toast('Captions unavailable (' + e.message + '). Listening to the video’s audio instead.'); }
+      if (my !== state.openSeq) return;
     }
-    if (my !== state.openSeq) return;
-    $('#capBody').innerHTML = '';
     if (segs && segs.length) {
+      $('#capBody').innerHTML = '';
       ingestSegments(segs, state.live);
       setStatus('captions' + (auto ? ' (auto-generated)' : ''));
       if (state.live) state.pollTimer = setInterval(pollLive, 20000);
     } else {
-      ingestMetadata(meta);
-      setStatus(S.worker ? 'metadata only (no captions found)' : 'metadata only · add a transcript service for full captions');
+      const started = audio ? await audio : await startAudio(true, true);
+      if (my !== state.openSeq) return;
+      if (!started) {
+        $('#capBody').innerHTML = ''; ingestMetadata(meta);
+        setStatus('title and description only · start transcription to check what is said');
+      }
     }
     state.flags = V.flags.video(meta, transcriptText());
-    if (!S.key) toast('Add a Google API key in Setup & settings (page footer) to look up fact-checks.');
+    if (!S.key && !(V.info && V.info.anthropic)) toast('Add a Google API key in Setup & settings (page footer) to look up fact-checks.');
     schedule();
   }
   function ingestMetadata(meta) {
@@ -356,6 +371,7 @@
       state.cards.forEach(c => {
         if (!c.shown && (c.verdict === 'FALSE' || c.verdict === 'MISLEADING') && c.t <= cur && c.t > cur - 8) { c.shown = true; showLower(c); }
       });
+      if (state.newestFirst) { renderTimeline(); return; }
       let act = -1;
       for (let i = 0; i < state.lines.length; i++) { if (state.lines[i].t <= cur) act = i; else break; }
       if (act !== state.activeLine && act >= 0) {
@@ -396,7 +412,7 @@
     const n = k => state.cards.filter(c => c.verdict === k).length;
     const T = n('TRUE'), M = n('MISLEADING'), F = n('FALSE'), R = n('REPORTED'), X = n('NOMATCH'), P = n('PENDING');
     $('#tally').innerHTML = `<div style="flex:${T};background:var(--true)"></div><div style="flex:${M};background:var(--mis)"></div><div style="flex:${F};background:var(--false)"></div><div style="flex:${R};background:var(--silver)"></div><div style="flex:${X};background:var(--none)"></div>`;
-    $('#tallyTxt').textContent = state.cards.length ? `${T} true · ${M} misleading · ${F} false · ${R} related reporting · ${X} no match · ${P} checking` : 'No claims checked yet.';
+    $('#tallyTxt').textContent = state.cards.length ? `${T} true · ${M} misleading · ${F} false · ${R} related reporting · ${X} no match · ${P} checking \u00B7 ${state.lines.length} lines heard` : (state.lines.length ? `${state.lines.length} lines heard, no checkable claims yet.` : 'No claims checked yet.');
   }
 
   const arc = (a1, a2) => {
@@ -565,25 +581,55 @@
         if (r.isFinal) { if (interimEl) { interimEl.remove(); interimEl = null; } splitSentences(txt).forEach(s => liveLine(s, $('#who').value)); }
         else {
           ensureSession();
-          if (!interimEl) { interimEl = document.createElement('p'); interimEl.className = 'line interim'; interimEl.innerHTML = '<span class="sp"></span><span class="tx"></span>'; $('#capBody').appendChild(interimEl); }
-          interimEl.querySelector('.tx').textContent = txt; const b = $('#capBody'); b.scrollTop = b.scrollHeight;
+          if (!interimEl) { interimEl = document.createElement('p'); interimEl.className = 'line interim'; interimEl.innerHTML = '<span class="sp">\u2026</span><span class="tx"></span>'; placeLine(interimEl); }
+          interimEl.querySelector('.tx').textContent = txt; scrollLatest();
         }
       }
     };
     rec.onerror = e => { if (e.error !== 'no-speech') toast('Microphone: ' + e.error); };
     rec.onend = () => { state.rec = null; btn.textContent = 'Listen (mic)'; btn.setAttribute('aria-pressed', 'false'); };
+    state.newestFirst = true;
     try { rec.start(); state.rec = rec; btn.textContent = 'Stop listening'; btn.setAttribute('aria-pressed', 'true'); ensureSession(); setStatus('microphone'); toast('Listening. Play the audio through speakers so the microphone can hear it.'); }
     catch { toast('Could not start the microphone.'); }
   }
 
-  /* ================= TAB AUDIO (live streams) ================= */
-  let tab = null;
+  /* ================= LIVE AUDIO: cloud (Deepgram) and free (on-device Whisper) ================= */
+  const LOCAL_LABEL = 'Tab audio: free', CLOUD_LABEL = 'Tab audio: cloud';
+  let tab = null, local = null, lw = null, lwReady = null, lwModel = '', lwFiles = {}, lwDevice = '', liveCount = 0;
+
+  function placeLine(el) { const b = $('#capBody'); if (state.newestFirst) b.insertBefore(el, b.firstChild); else b.appendChild(el); }
+  function scrollLatest() { const b = $('#capBody'); b.scrollTop = state.newestFirst ? 0 : b.scrollHeight; }
+  function showBanner(msg) { $('#audioBannerText').textContent = msg; $('#audioBanner').hidden = false; }
+  function hideBanner() { $('#audioBanner').hidden = true; }
+
+  // Time of a statement: the video's own clock when this page is playing it, otherwise time since capture began.
+  function clockNow(self, startMs) {
+    if (self && state.mode === 'video' && player && player.getPlayerState) {
+      try { if (player.getPlayerState() === 1) { const c = curTime(); if (c != null) return c; } } catch {}
+    }
+    return self ? (Date.now() - startMs) / 1000 : sessionT();
+  }
+  function prepCapture(self) {
+    if (state.mode === 'doc' || (!self && state.mode !== 'session')) { reset(); state.mode = 'session'; state.live = false; }
+    document.querySelectorAll('#capBody .empty').forEach(e => e.remove());
+    state.newestFirst = true;
+    if (!self) ensureSession();
+    setStatus('listening');
+  }
+  const shareOpts = self => ({ video: { width: 2, height: 2, frameRate: 1 }, audio: true, systemAudio: 'exclude', ...(self ? { preferCurrentTab: true, selfBrowserSurface: 'include' } : {}) });
+  const canShare = () => !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia);
+
   function ingestLive(text, speaker, t) {
     document.querySelectorAll('#capBody .empty').forEach(e => e.remove());
-    if (state.mode === 'doc') { reset(); state.mode = 'session'; }
-    if (state.mode === 'video') { makeLine(text, t != null ? Math.max(0, t) : (curTime() || 0), speaker); const b = $('#capBody'); b.scrollTop = b.scrollHeight; schedule(); }
-    else { ensureSession(); makeLine(text, t != null ? Math.max(0, t) : sessionT(), speaker); const b = $('#capBody'); b.scrollTop = b.scrollHeight; schedule(); }
+    makeLine(text, t != null ? Math.max(0, t) : (state.mode === 'video' ? (curTime() || 0) : sessionT()), speaker);
+    scrollLatest(); schedule();
+    if (++liveCount % 6 === 0) state.flags = V.flags.video(state.video || { title: '' }, transcriptText());
   }
+
+  // Best engine available: cloud when the service has a Deepgram key, otherwise the free on-device model.
+  function startAudio(self, quiet) { return (V.info && V.info.deepgram) ? startCloud({ self, quiet }) : startLocal({ self, quiet }); }
+
+  /* ---------- cloud ---------- */
   function stopTab() {
     if (!tab) return;
     const t = tab; tab = null;
@@ -591,36 +637,39 @@
     try { t.proc.disconnect(); t.ctx.close(); } catch {}
     try { t.stream.getTracks().forEach(x => x.stop()); } catch {}
     if (interimEl) { interimEl.remove(); interimEl = null; }
-    const btn = $('#btnTab'); btn.textContent = 'Capture tab audio'; btn.setAttribute('aria-pressed', 'false');
+    const btn = $('#btnTab'); btn.textContent = CLOUD_LABEL; btn.setAttribute('aria-pressed', 'false');
     setStatus('');
   }
-  async function toggleTab() {
-    if (tab) { stopTab(); return; }
+  async function startCloud(opts = {}) {
+    const self = !!opts.self, bail = msg => { if (opts.quiet) showBanner(msg); else toast(msg); return false; };
+    if (!S.worker) return bail('Live capture needs the transcript service. Add its address in Setup & settings (page footer).');
+    if (!canShare()) return bail('This browser cannot share tab audio. Use Chrome.');
     stopLocal();
-    if (!S.worker) { toast('Live capture needs the transcript service. Open Setup & settings (page footer) and add its address.'); return; }
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) { toast('This browser cannot share tab audio. Use Chrome.'); return; }
     let token;
-    try { token = await V.yt.deepgramToken(); } catch (e) { toast('Could not start: ' + e.message); return; }
+    try { token = await V.yt.deepgramToken(); } catch (e) { return bail('Could not start cloud transcription: ' + e.message); }
     let stream;
-    try {
-      stream = await navigator.mediaDevices.getDisplayMedia({ video: { width: 2, height: 2, frameRate: 1 }, audio: true, preferCurrentTab: true, selfBrowserSurface: 'include', systemAudio: 'exclude' });
-    } catch { toast('Sharing was cancelled.'); return; }
+    try { stream = await navigator.mediaDevices.getDisplayMedia(shareOpts(self)); }
+    catch { return bail('Choose "Share" so Veritas can hear this tab. Click Start transcription to try again.'); }
     const at = stream.getAudioTracks();
-    if (!at.length) { stream.getTracks().forEach(x => x.stop()); toast('No audio was shared. Choose the Chrome Tab option and tick "Also share tab audio".'); return; }
+    if (!at.length) { stream.getTracks().forEach(x => x.stop()); return bail('No audio was shared. Choose the tab and tick "Also share tab audio".'); }
+    prepCapture(self); hideBanner();
     const ctx = new AudioContext({ sampleRate: 16000 });
     const src = ctx.createMediaStreamSource(new MediaStream(at));
     const proc = ctx.createScriptProcessor(4096, 1, 1);
     const mute = ctx.createGain(); mute.gain.value = 0;
-    const params = ['encoding=linear16', 'sample_rate=16000', 'channels=1', 'model=nova-2', 'language=en-US', 'punctuate=true', 'interim_results=true', 'utterance_end_ms=1500', 'smart_format=true', 'diarize=true'].join('&');
+    const params = ['encoding=linear16', 'sample_rate=16000', 'channels=1', 'model=nova-2', 'language=en-US', 'punctuate=true', 'interim_results=true', 'utterance_end_ms=1000', 'smart_format=true', 'diarize=true'].join('&');
     const ws = new WebSocket('wss://api.deepgram.com/v1/listen?' + params, ['bearer', token]);
+    const startMs = Date.now();
     tab = { stream, ctx, proc, ws };
-    let buf = '', spk = 'A';
+    let buf = '', bufStart = null, spk = 'A', base = 0;
     const flush = () => {
-      const text = buf.trim(); buf = '';
+      const text = buf.trim(), t = bufStart != null ? base + bufStart : clockNow(self, startMs);
+      buf = ''; bufStart = null;
       if (interimEl) { interimEl.remove(); interimEl = null; }
-      if (text) splitSentences(text).forEach(s => ingestLive(s, spk));
+      if (text) splitSentences(text).forEach(s => ingestLive(s, spk, t));
     };
     ws.onopen = () => {
+      base = clockNow(self, startMs);
       proc.onaudioprocess = e => {
         if (ws.readyState !== 1) return;
         const f = e.inputBuffer.getChannelData(0), i16 = new Int16Array(f.length);
@@ -629,7 +678,7 @@
       };
       src.connect(proc); proc.connect(mute); mute.connect(ctx.destination);
       const btn = $('#btnTab'); btn.textContent = 'Stop capture'; btn.setAttribute('aria-pressed', 'true');
-      setStatus('tab audio · live'); toast('Listening to the shared tab.');
+      setStatus('cloud transcription · live');
     };
     ws.onmessage = ev => {
       let d; try { d = JSON.parse(ev.data); } catch { return; }
@@ -638,20 +687,20 @@
       if (!alt || !alt.transcript) return;
       const w0 = alt.words && alt.words[0]; if (w0 && w0.speaker != null) spk = w0.speaker === 1 ? 'B' : 'A';
       const text = alt.transcript.trim(); if (!text) return;
-      if (d.is_final) { buf += (buf ? ' ' : '') + text; if (d.speech_final) flush(); }
+      if (d.is_final) { if (!buf) bufStart = w0 ? w0.start : null; buf += (buf ? ' ' : '') + text; if (d.speech_final) flush(); }
       else {
-        if (!interimEl) { document.querySelectorAll('#capBody .empty').forEach(e => e.remove()); interimEl = document.createElement('p'); interimEl.className = 'line interim'; interimEl.innerHTML = '<span class="sp"></span><span class="tx"></span>'; $('#capBody').appendChild(interimEl); }
-        interimEl.querySelector('.tx').textContent = (buf ? buf + ' ' : '') + text; const b = $('#capBody'); b.scrollTop = b.scrollHeight;
+        if (!interimEl) { document.querySelectorAll('#capBody .empty').forEach(e => e.remove()); interimEl = document.createElement('p'); interimEl.className = 'line interim'; interimEl.innerHTML = '<span class="sp">…</span><span class="tx"></span>'; placeLine(interimEl); }
+        interimEl.querySelector('.tx').textContent = (buf ? buf + ' ' : '') + text; scrollLatest();
       }
     };
     ws.onerror = () => toast('Live transcription connection problem.');
     ws.onclose = () => { if (tab && tab.ws === ws) { toast('Live transcription stopped.'); stopTab(); } };
     at[0].addEventListener('ended', () => { if (tab && tab.stream === stream) stopTab(); });
+    return true;
   }
+  function toggleTab() { if (tab) stopTab(); else startCloud({ self: false, quiet: false }); }
 
-  /* ================= FREE MODE: on-device speech model ================= */
-  const LOCAL_LABEL = 'Tab audio: free';
-  let local = null, lw = null, lwReady = null, lwModel = '', lwFiles = {}, dropped = 0;
+  /* ---------- free: on-device model ---------- */
   function killLocalWorker() { if (lw) { lw.terminate(); lw = null; lwReady = null; } }
   function ensureWorker() {
     if (lw && lwModel === S.localModel) return lwReady;
@@ -665,9 +714,9 @@
           if (p.status === 'progress' && p.total) {
             lwFiles[p.file] = { l: p.loaded, t: p.total };
             const l = Object.values(lwFiles).reduce((a, f) => a + f.l, 0), t = Object.values(lwFiles).reduce((a, f) => a + f.t, 0);
-            setStatus('downloading speech model ' + Math.round(l / t * 100) + '%');
+            setStatus('downloading speech model ' + Math.round(l / t * 100) + '% (one time)');
           }
-        } else if (m.type === 'ready') { setStatus('free mode \u00B7 model ready (' + m.device + ')'); resolve(m.device); }
+        } else if (m.type === 'ready') { lwDevice = m.device; resolve(m.device); }
         else if (m.type === 'result') onLocalResult(m);
         else if (m.type === 'error') { toast('Speech model: ' + m.message); reject(new Error(m.message)); }
       };
@@ -678,12 +727,21 @@
   }
   const HALLUCINATION = /^\s*(\[[^\]]*\]|\([^)]*\)|thank you\.?|thanks for watching\.?|thanks\.?|you\.?|bye\.?|\.+)\s*$/i;
   function onLocalResult(m) {
-    if (!local) return;
-    const rec = local.pend.get(m.id); local.pend.delete(m.id);
-    setStatus('free mode' + (local.pend.size ? ' \u00B7 ' + local.pend.size + ' queued' : '') + (dropped ? ' \u00B7 skipped ' + dropped : ''));
+    const L = local; if (!L) return;
+    const rec = L.pend && L.pend.id === m.id ? L.pend : null;
+    L.busy = false; L.pend = null;
+    let lag = 0;
+    if (rec) {
+      const dur = (performance.now() - rec.sent) / 1000; L.avg = L.avg ? L.avg * 0.6 + dur * 0.4 : dur;
+      lag = (performance.now() - rec.heard) / 1000;
+    }
     const text = (m.text || '').replace(/\s+/g, ' ').trim();
-    if (!rec || !text || HALLUCINATION.test(text)) return;
-    splitSentences(text).forEach(s => ingestLive(s, 'A', rec.t));
+    if (rec && text && !HALLUCINATION.test(text)) {
+      const sents = splitSentences(text), span = Math.max(1, rec.secs), each = span / sents.length;
+      sents.forEach((s, i) => ingestLive(s, 'A', rec.t + i * each));
+    }
+    setStatus(`free mode · about ${Math.round(lag)}s behind${lwDevice === 'wasm' ? ' (CPU)' : ''}${L.avg > V.config.local.maxSec ? ' · this device is slow, try cloud mode' : ''}`);
+    L.pump();
   }
   function stopLocal() {
     if (!local) return;
@@ -693,57 +751,67 @@
     const btn = $('#btnLocal'); btn.textContent = LOCAL_LABEL; btn.setAttribute('aria-pressed', 'false'); btn.disabled = false;
     setStatus('');
   }
-  async function toggleLocal() {
-    if (local) { stopLocal(); return; }
-    const btn = $('#btnLocal');
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) { toast('This browser cannot share tab audio. Use Chrome.'); return; }
-    if (!window.Worker) { toast('This browser cannot run the on-device model.'); return; }
+  async function startLocal(opts = {}) {
+    const self = !!opts.self, bail = msg => { if (opts.quiet) showBanner(msg); else toast(msg); return false; };
+    if (!canShare()) return bail('This browser cannot share tab audio. Use Chrome.');
+    if (!window.Worker) return bail('This browser cannot run the on-device model.');
     stopTab();
-    if (state.mode === 'doc') { reset(); state.mode = 'session'; }
-    btn.disabled = true; btn.textContent = 'Loading model\u2026';
-    toast('First use downloads the speech model once (tens of MB). Keep this tab open.');
-    try { await ensureWorker(); }
-    catch (e) { btn.disabled = false; btn.textContent = LOCAL_LABEL; killLocalWorker(); setStatus(''); toast('Could not load the speech model: ' + e.message + '. It needs access to cdn.jsdelivr.net and huggingface.co.'); return; }
-    let stream;
-    try { stream = await navigator.mediaDevices.getDisplayMedia({ video: { width: 2, height: 2, frameRate: 1 }, audio: true, systemAudio: 'exclude' }); }
-    catch { btn.disabled = false; btn.textContent = LOCAL_LABEL; toast('Sharing was cancelled.'); return; }
+    let stream;                      // ask for the audio first: Chrome only allows this right after a click
+    try { stream = await navigator.mediaDevices.getDisplayMedia(shareOpts(self)); }
+    catch { return bail('Choose "Share" so Veritas can hear this tab. Click Start transcription to try again.'); }
     const at = stream.getAudioTracks();
-    if (!at.length) { stream.getTracks().forEach(x => x.stop()); btn.disabled = false; btn.textContent = LOCAL_LABEL; toast('No audio was shared. Choose the Chrome Tab option, pick the tab with the video, and tick "Also share tab audio".'); return; }
-    const cfgL = V.config.local;
+    if (!at.length) { stream.getTracks().forEach(x => x.stop()); return bail('No audio was shared. Choose the tab and tick "Also share tab audio".'); }
+    prepCapture(self); hideBanner();
+    const cfgL = V.config.local, BLOCK = 4096, SEC = BLOCK / 16000, startMs = Date.now();
     const ctx = new AudioContext({ sampleRate: 16000 });
     const src = ctx.createMediaStreamSource(new MediaStream(at));
-    const proc = ctx.createScriptProcessor(4096, 1, 1);
+    const proc = ctx.createScriptProcessor(BLOCK, 1, 1);
     const mute = ctx.createGain(); mute.gain.value = 0;
-    const L = local = { stream, ctx, proc, buf: [], len: 0, quiet: 0, voiced: false, pend: new Map(), seq: 0 };
-    dropped = 0; ensureSession();
-    const nowT = () => state.mode === 'video' ? (curTime() || 0) : sessionT();
-    const flush = () => {
-      const secs = L.len / 16000, had = L.voiced, parts = L.buf;
-      L.buf = []; L.len = 0; L.quiet = 0; L.voiced = false;
-      if (!had) return;
-      if (L.pend.size >= cfgL.maxQueue) { dropped++; setStatus('free mode \u00B7 device too slow, skipped ' + dropped + ' (try cloud mode)'); return; }
-      const audio = new Float32Array(Math.round(secs * 16000)); let o = 0;
-      parts.forEach(p => { audio.set(p, o); o += p.length; });
-      const id = ++L.seq; L.pend.set(id, { t: nowT() - secs });
+    const L = local = { stream, ctx, proc, blocks: [], ready: false, busy: true, avg: 0, seq: 0, pend: null };
+    const btn = $('#btnLocal'); btn.textContent = 'Stop free capture'; btn.setAttribute('aria-pressed', 'true');
+
+    const send = cut => {
+      const t = clockNow(self, startMs) - L.blocks.length * SEC;      // when the first buffered block was heard
+      const heardEnd = performance.now() - (L.blocks.length - cut) * SEC * 1000;
+      const part = L.blocks.splice(0, cut);
+      if (!part.some(b => !b.quiet)) { L.pump(); return; }              // only silence: skip it
+      const audio = new Float32Array(part.length * BLOCK);
+      part.forEach((b, i) => audio.set(b.f, i * BLOCK));
+      const id = ++L.seq; L.busy = true;
+      L.pend = { id, t: Math.max(0, t), secs: part.length * SEC, sent: performance.now(), heard: heardEnd };
       lw.postMessage({ type: 'run', id, audio }, [audio.buffer]);
-      setStatus('free mode \u00B7 ' + L.pend.size + ' queued');
+    };
+    // Whenever the model is idle, send everything heard so far, cut at the last pause so words are not split.
+    L.pump = () => {
+      if (local !== L || !L.ready || L.busy) return;
+      const bl = L.blocks, n = bl.length;
+      if (n * SEC < cfgL.minSec) return;
+      let tail = 0; for (let i = n - 1; i >= 0 && bl[i].quiet; i--) tail++;
+      let cut = 0;
+      if (tail >= 2) cut = n;
+      else {
+        for (let i = n - 1; i >= 0; i--) { if (bl[i].quiet && (i + 1) * SEC >= cfgL.minSec) { cut = i + 1; break; } }
+        if (!cut && n * SEC >= cfgL.maxSec) cut = n;
+      }
+      if (!cut) return;
+      send(Math.min(cut, Math.floor(cfgL.hardSec / SEC)));
     };
     proc.onaudioprocess = e => {
       if (local !== L) return;
       const f = new Float32Array(e.inputBuffer.getChannelData(0));
       let s = 0; for (let i = 0; i < f.length; i++) s += f[i] * f[i];
-      const quiet = Math.sqrt(s / f.length) < cfgL.quietRms;
-      L.buf.push(f); L.len += f.length;
-      if (quiet) L.quiet++; else { L.voiced = true; L.quiet = 0; }
-      const secs = L.len / 16000;
-      if ((secs >= cfgL.minSec && L.quiet >= 2) || secs >= cfgL.maxSec) flush();
-      else if (!L.voiced && secs >= 2) { L.buf = []; L.len = 0; L.quiet = 0; }
+      L.blocks.push({ f, quiet: Math.sqrt(s / f.length) < cfgL.quietRms });
+      if (L.blocks.length > 120 / SEC) L.blocks.splice(0, 40);           // never hold more than about two minutes
+      L.pump();
     };
     src.connect(proc); proc.connect(mute); mute.connect(ctx.destination);
-    btn.disabled = false; btn.textContent = 'Stop free capture'; btn.setAttribute('aria-pressed', 'true');
-    setStatus('free mode \u00B7 listening'); toast('Listening to the shared tab. Text appears a few seconds after it is spoken.');
     at[0].addEventListener('ended', () => { if (local === L) stopLocal(); });
+    setStatus(lw && lwModel === S.localModel ? 'free mode · listening' : 'loading speech model (first time only)');
+    ensureWorker().then(() => { if (local === L) { L.ready = true; L.busy = false; V.store.set('localUsed', true); setStatus('free mode · listening'); L.pump(); } })
+      .catch(e => { if (local === L) { toast('Could not load the speech model: ' + e.message + '. It needs access to cdn.jsdelivr.net and huggingface.co.'); killLocalWorker(); stopLocal(); } });
+    return true;
   }
+  function toggleLocal() { if (local) stopLocal(); else startLocal({ self: false, quiet: false }); }
 
   /* ================= SETUP SELF-TEST ================= */
   async function selfTest() {
@@ -764,6 +832,7 @@
         if (!r.ok || !j.ok) add('bad', 'Transcript service: ' + errMsg(r, j));
         else {
           add('ok', 'Transcript service is running');
+          add(j.anthropic ? 'ok' : 'warn', j.anthropic ? 'Claim research key is set (AI research tier on)' : 'Claim research key (ANTHROPIC_API_KEY) is not set. Without it only published fact-checks are used');
           add(j.supadata ? 'ok' : 'warn', j.supadata ? 'Hosted caption provider key is set' : 'Hosted caption provider key (SUPADATA_API_KEY) is not set. Recommended: YouTube often blocks direct caption access');
           add(j.deepgram ? 'ok' : 'warn', j.deepgram ? 'Live tab-audio key is set' : 'Live tab-audio key (DEEPGRAM_API_KEY) is not set, needed only for live capture');
           const t = await get(worker + '/transcript?v=dQw4w9WgXcQ');
@@ -803,7 +872,7 @@
     S.key = $('#keyInput').value.trim(); S.cx = $('#cxInput').value.trim(); S.worker = $('#workerInput').value.trim();
     const mdl = $('#modelInput').value; if (mdl !== S.localModel) { S.localModel = mdl; stopLocal(); killLocalWorker(); }
     V.saveSettings();
-    toast('Saved in this browser.'); state.feed = null; state.shorts = null; loadBrowse(true);
+    toast('Saved in this browser.'); loadInfo(); state.feed = null; state.shorts = null; loadBrowse(true);
   });
   $('#btnText').addEventListener('click', () => $('#dlgText').showModal());
   $('#runText').addEventListener('click', () => { const t = $('#textIn').value.trim(); if (t) openText(t); });
@@ -819,6 +888,14 @@
     $('#addName').value = ''; $('#addRef').value = ''; selectOutlet(o);
   });
 
+  function loadInfo() {
+    V.info = null;
+    if (!S.worker) return;
+    fetch(S.worker.replace(/\/$/, '') + '/').then(r => r.json()).then(j => { if (j && j.ok) V.info = j; }).catch(() => {});
+  }
+  $('#audioBannerBtn').addEventListener('click', () => { hideBanner(); startAudio(true, false); });
+  loadInfo();
+  if (V.store.get('localUsed', false) && 'Worker' in window) setTimeout(() => { if (!(V.info && V.info.deepgram)) ensureWorker().catch(() => {}); }, 2500);
   renderOutlets(); renderMeters(); renderTimeline(); renderCards();
   selectOutlet(state.outlets[0]);
   loadBrowse(false);

@@ -113,5 +113,16 @@ V.yt = (() => {
     return j.token;
   }
 
-  return { parseLink, one, details, feed, shorts, transcript, article, deepgramToken };
+  async function judge(claim, context) {
+    if (!V.settings.worker) throw new Error('No transcript service set');
+    const r = await fetch(V.settings.worker.replace(/\/$/, '') + '/judge', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ claim, context, today: new Date().toISOString().slice(0, 10) })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || 'Claim research failed');
+    return j;
+  }
+
+  return { parseLink, one, details, feed, shorts, transcript, article, deepgramToken, judge };
 })();

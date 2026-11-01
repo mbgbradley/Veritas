@@ -50,3 +50,8 @@ Without any setup you can still use the demo, red flags, **Check text**, and the
 - `docs/assets/whisper-worker.js`: on-device speech model for free mode
 - `worker/`: transcript, article and live-audio token service
 - `GUIDE-CLOUDFLARE.md`: setup walkthrough
+
+## v6 notes
+- Transcription starts automatically when a video is opened (one Chrome share click). Newest line first; timestamps follow the video clock.
+- New AI research tier (Cloudflare secret `ANTHROPIC_API_KEY`, route `/judge`): claims without a published fact-check are researched on the web and labelled "AI research". Capped per session.
+- Real Whisper, Deepgram and web-search behavior was not tested from the build environment; use Test setup and report any message.

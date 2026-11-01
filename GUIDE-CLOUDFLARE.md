@@ -106,3 +106,26 @@ What to expect
 - Captions come from an unofficial route and may break if YouTube changes things. Review YouTube's Terms of Service before using this publicly.
 - Deepgram bills by audio minute after the free credit is used. Watch usage in the Deepgram console.
 - Cloudflare's free plan allows 100,000 requests a day, far more than this needs.
+
+---
+
+## 5. Turn on AI claim research (what makes claims get verdicts)
+
+Published fact-checks only exist for a small share of what people say. This step lets Veritas research the rest with web search and return True / Misleading / False, with sources, clearly labelled "AI research".
+
+1. Go to **console.anthropic.com**, sign up, add a few dollars of credit, and under **Settings > Limits** set a low monthly spend limit.
+2. In the console, make sure **web search** is enabled for your organization (Settings > Privacy or Features, depending on the screen).
+3. **API Keys > Create Key.** Copy it.
+4. Cloudflare > your worker > **Settings > Variables and Secrets > Add**: Type **Secret**, name `ANTHROPIC_API_KEY`, paste the key. Deploy. (Re-paste the updated worker code from `worker/transcript-worker.js` first; it now has a `/judge` route.)
+5. Optional: Type **Text**, name `JUDGE_MODEL`, to pick another model.
+6. Setup & settings > **Test setup** should show "Claim research key is set".
+
+Cost: each researched claim is one request with up to three web searches, roughly a few cents. Veritas caps this at 30 per session (`V.config.judge.maxPerSession` in config.js). Keep your spend limit low.
+
+## 6. How transcription starts now
+
+Click any video and Veritas starts listening automatically. Chrome still shows its share prompt once per video (it cannot be skipped): pick **This tab** and make sure audio sharing is on. If you decline, a "Start transcription" bar appears under the player.
+
+- With `DEEPGRAM_API_KEY` set: cloud transcription, words in about 1 to 2 seconds.
+- Without it: free on-device model. The first use downloads about 40 MB. Expect several seconds of delay; weak Chromebooks may lag more. Cloud mode is the way to get true real time.
+- Newest words are on the first line. Times are the video's own clock when the video is playing in this page.

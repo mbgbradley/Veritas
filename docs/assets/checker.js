@@ -3,19 +3,23 @@
    Tier 2: if no fact-checker matched, search a custom list of wire/center outlets (Programmable Search) for related reporting.
    Results are "related", never a ruling by Veritas. */
 V.checker = (() => {
-  const CLAIM_RE = /\d|\b(percent|million|billion|trillion|doubled|tripled|halved|record|highest|lowest|never|always|every|nobody|no one|none|more than|less than|fewer|increase[ds]?|decrease[ds]?|rose|fell|cut|raised|lowered|passed|voted|signed|since|according to|unemployment|inflation|deficit|crime|tax(?:es)?|cost|costs|killed|died|arrested|banned|approved|ruled)\b/i;
-  const OPINION_RE = /^(i think|i feel|i believe|i hope|maybe|perhaps|we should|you should|let me|thank you|thanks)\b/i;
+  const CLAIM_RE = /\d|\b(percent|million|billion|trillion|doubled|tripled|halved|record|highest|lowest|never|always|every|nobody|no one|none|more than|less than|fewer|increase[ds]?|decrease[ds]?|rose|fell|cut|raised|lowered|passed|voted|signed|since|according to|unemployment|inflation|deficit|crime|tax(?:es)?|cost|costs|killed|died|arrested|banned|approved|ruled|said|says|announced|ordered|rejected|won|lost|invaded|attacked|resigned|elected|appointed|charged|convicted|sentenced|created|launched|grew|dropped|climbed|collapsed|eliminated|created|funded|signed|vetoed|repealed|imposed)\b/i;
+  const OPINION_RE = /^(i think|i feel|i believe|i hope|i guess|maybe|perhaps|we should|you should|let me|thank you|thanks|well,? |so,? |um|uh)\b/i;
 
   function isClaim(s) {
     s = s.trim();
-    if (s.split(/\s+/).length < 6 || s.endsWith('?') || OPINION_RE.test(s)) return false;
-    return CLAIM_RE.test(s) || V.flags.sentence(s).some(f => f.id === 'good');
+    const wc = s.split(/\s+/).length;
+    if (wc < 6 || s.endsWith('?') || OPINION_RE.test(s)) return false;
+    if (CLAIM_RE.test(s) || V.flags.sentence(s).some(f => f.id === 'good')) return true;
+    // a longer sentence naming someone or something specific mid-sentence is often a factual statement
+    return wc >= 9 && /\s[A-Z][a-z]{2,}/.test(s.slice(1));
   }
   // Rank used to spend the checking budget on the most check-worthy sentences first.
   function priority(s) {
     let p = 0;
     if (/\d/.test(s)) p += 2;
     if (/\b(percent|million|billion|trillion|doubled|tripled|record|never|always|every|nobody)\b/i.test(s)) p += 2;
+    if (/\s[A-Z][a-z]{2,}/.test(s.slice(1))) p += 1;
     p += V.flags.sentence(s).length;
     return p;
   }
@@ -66,39 +70,60 @@ V.checker = (() => {
 
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-  async function check(text) {
+  let judgeLeft = V.config.judge.maxPerSession;
+  const resetBudget = () => { judgeLeft = V.config.judge.maxPerSession; };
+  const judgeOn = () => !!(V.settings.worker && V.info && V.info.anthropic);
+
+  async function check(text, ctx) {
     const k = text.toLowerCase().replace(/\s+/g, ' ').trim();
     if (cache.has(k)) return cache.get(k);
     const p = (async () => {
-      if (!V.settings.key) return { verdict: 'NOMATCH', detail: 'Add a Google API key in Setup & settings (page footer) to look up published fact-checks.', sources: [] };
-      // Tier 1
-      let hits = (await factCheckSearch(text)).filter(h => h.sim >= 0.5 && h.url);
-      if (hits.length) {
-        const rank = h => { const i = matchHost(host(h.url), V.config.checkers); return i < 0 ? 99 : i; };
-        hits.sort((a, b) => rank(a) - rank(b) || b.sim - a.sim);
-        const top3 = hits.slice(0, 3), verdicts = top3.map(h => mapRating(h.rating));
-        let verdict = verdicts[0];
-        const mixed = verdicts.includes('TRUE') && verdicts.includes('FALSE');
-        if (mixed) verdict = 'MISLEADING';
-        const t = top3[0], ti = matchHost(host(t.url), V.config.checkers);
-        const who = ti >= 0 ? V.config.checkers[ti].name : (t.publisher || 'A fact-checker');
-        const detail = `${mixed ? 'Fact-checkers differ on similar claims. ' : ''}<b>${esc(who)}</b> rated a similar claim “${esc(t.rating || 'reviewed')}”: “${esc((t.claim || '').slice(0, 160))}”. Confirm it matches what was said.`;
-        return { verdict, detail, sources: top3.map(h => ({ url: h.url, label: (h.publisher || host(h.url)) + (h.rating ? ' · ' + h.rating : '') })) };
-      }
-      // Tier 2
-      if (V.settings.cx) {
-        const rep = await reportingSearch(text);
-        if (rep.length) {
-          return { verdict: 'REPORTED', detail: 'No fact-checker has reviewed this wording. These outlets report on the topic. That is context, not confirmation.',
-            sources: rep.slice(0, 3).map(r => ({ url: r.url, label: r.name, bias: r.bias, by: r.by })) };
+      // Tier 1: published fact-checks
+      if (V.settings.key) {
+        const hits = (await factCheckSearch(text)).filter(h => h.sim >= 0.5 && h.url);
+        if (hits.length) {
+          const rank = h => { const i = matchHost(host(h.url), V.config.checkers); return i < 0 ? 99 : i; };
+          hits.sort((a, b) => rank(a) - rank(b) || b.sim - a.sim);
+          const top3 = hits.slice(0, 3), verdicts = top3.map(h => mapRating(h.rating));
+          let verdict = verdicts[0];
+          const mixed = verdicts.includes('TRUE') && verdicts.includes('FALSE');
+          if (mixed) verdict = 'MISLEADING';
+          const t = top3[0], ti = matchHost(host(t.url), V.config.checkers);
+          const who = ti >= 0 ? V.config.checkers[ti].name : (t.publisher || 'A fact-checker');
+          const detail = `${mixed ? 'Fact-checkers differ on similar claims. ' : ''}<b>${esc(who)}</b> rated a similar claim “${esc(t.rating || 'reviewed')}”: “${esc((t.claim || '').slice(0, 160))}”. Confirm it matches what was said.`;
+          return { verdict, detail, sources: top3.map(h => ({ url: h.url, label: (h.publisher || host(h.url)) + (h.rating ? ' · ' + h.rating : '') })) };
         }
       }
-      return { verdict: 'NOMATCH', detail: 'No published fact-check or related reporting matched this wording. That does not mean it is true or false.', sources: [] };
+      // Tier 2: related reporting from a custom outlet list (optional; Google is retiring this API)
+      if (V.settings.key && V.settings.cx) {
+        try {
+          const rep = await reportingSearch(text);
+          if (rep.length) {
+            return { verdict: 'REPORTED', detail: 'No fact-checker has reviewed this wording. These outlets report on the topic. That is context, not confirmation.',
+              sources: rep.slice(0, 3).map(r => ({ url: r.url, label: r.name, bias: r.bias, by: r.by })) };
+          }
+        } catch (e) { /* fall through to research */ }
+      }
+      // Tier 3: AI research with web search (needs ANTHROPIC_API_KEY on the worker)
+      if (judgeOn() && judgeLeft > 0) {
+        judgeLeft--;
+        const j = await V.yt.judge(text, ctx || '');
+        const sources = (j.sources || []).map(s => ({ url: s.url, label: s.title || host(s.url) }));
+        if (j.verdict === 'TRUE' || j.verdict === 'MISLEADING' || j.verdict === 'FALSE') {
+          return { verdict: j.verdict, sources,
+            detail: `<b>AI research</b> using web sources, not a published fact-check${j.confidence ? ' (confidence: ' + esc(j.confidence) + ')' : ''}. ${esc(j.explanation)}` };
+        }
+        return { verdict: 'NOMATCH', sources, detail: `<b>Could not verify.</b> ${esc(j.explanation || 'Not enough reliable evidence found.')}` };
+      }
+      const why = !V.settings.key && !judgeOn() ? 'Add a Google API key in Setup & settings (page footer) to look up published fact-checks.'
+        : judgeOn() ? 'No published fact-check matched, and this session’s AI research limit was reached.'
+        : 'No published fact-check matched this wording. That does not mean it is true or false. To have Veritas research claims itself, add an Anthropic key to the service (see the guide).';
+      return { verdict: 'NOMATCH', detail: why, sources: [] };
     })();
     cache.set(k, p);
     p.catch(() => cache.delete(k));
     return p;
   }
 
-  return { isClaim, priority, check, mapRating };
+  return { isClaim, priority, check, mapRating, resetBudget };
 })();

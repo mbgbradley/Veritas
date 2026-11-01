@@ -4,10 +4,13 @@
 //   GET /transcript?v=VIDEO_ID   -> YouTube captions as timed segments
 //   GET /article?url=https://…   -> readable text of a web article
 //   GET /deepgram-token          -> short-lived key so the browser can stream tab audio to Deepgram
+//   POST /judge                  -> researches one claim on the web and returns a verdict (needs ANTHROPIC_API_KEY)
 //
 // Settings (Worker > Settings > Variables and Secrets):
 //   SUPADATA_API_KEY  (Secret)  recommended: a hosted transcript provider. YouTube often blocks Cloudflare's
 //                               servers, so reading captions directly can fail; this route avoids that.
+//   ANTHROPIC_API_KEY (Secret)  lets Veritas research and judge claims no fact-checker has covered
+//   JUDGE_MODEL       (Text)    optional model name for /judge (default claude-sonnet-5-5)
 //   DEEPGRAM_API_KEY  (Secret)  needed only for live tab-audio capture
 //   ALLOWED_ORIGIN    (Text)    your site, e.g. https://yourname.github.io  (recommended)
 //
@@ -25,7 +28,7 @@ export default {
     const origin = req.headers.get('Origin') || '';
     const cors = {
       'Access-Control-Allow-Origin': allowed === '*' ? '*' : allowed,
-      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
       'Access-Control-Allow-Headers': '*',
       'Vary': 'Origin'
     };
@@ -36,7 +39,8 @@ export default {
       if (url.pathname === '/transcript') return json(await transcript(url.searchParams.get('v'), env), cors, 60);
       if (url.pathname === '/article') return json(await article(url.searchParams.get('url')), cors, 300);
       if (url.pathname === '/deepgram-token') return json(await deepgramToken(env), cors, 0);
-      return json({ ok: true, deepgram: !!env.DEEPGRAM_API_KEY, supadata: !!env.SUPADATA_API_KEY, originLocked: allowed !== '*', routes: ['/transcript?v=', '/article?url=', '/deepgram-token'] }, cors, 0);
+      if (url.pathname === '/judge' && req.method === 'POST') return json(await judge(await req.json(), env), cors, 0);
+      return json({ ok: true, deepgram: !!env.DEEPGRAM_API_KEY, supadata: !!env.SUPADATA_API_KEY, anthropic: !!env.ANTHROPIC_API_KEY, originLocked: allowed !== '*', routes: ['/transcript?v=', '/article?url=', '/deepgram-token', 'POST /judge'] }, cors, 0);
     } catch (e) {
       return json({ error: String((e && e.message) || e) }, cors, 0, 502);
     }
@@ -61,6 +65,53 @@ async function deepgramToken(env) {
   const j = await r.json().catch(() => ({}));
   if (!r.ok || !j.access_token) throw new Error(j.err_msg || j.message || ('Deepgram returned ' + r.status));
   return { token: j.access_token };
+}
+
+/* ---------- Claim research: Claude with web search ---------- */
+const JUDGE_PROMPT = (today) => `You are a careful, neutral fact-checker. Today is ${today}.
+You are given ONE claim from an automatically transcribed political broadcast or video (the transcript may contain mistakes; use the context to interpret names and numbers).
+
+1. Decide whether it is a checkable factual claim (statistics, records, dates, official actions, quotes, public facts, science). Opinions, predictions, rhetoric and vague statements are NOT checkable: answer UNVERIFIABLE and say so.
+2. If checkable, search the web. Prefer primary and official sources (government data, court records, official statements) and established fact-checkers (PolitiFact, FactCheck.org, Snopes, AP, Reuters, Full Fact), then reputable news organizations. Judge only on the evidence you found, and watch the time period and the exact wording of the claim.
+3. Verdicts: TRUE = accurate; MISLEADING = partly true, missing important context, or framed in a way that gives a wrong impression; FALSE = contradicted by reliable evidence; UNVERIFIABLE = not enough reliable evidence, or not checkable. Prefer UNVERIFIABLE over a weak FALSE.
+
+Reply with ONLY a JSON object, no other text:
+{"verdict":"TRUE|MISLEADING|FALSE|UNVERIFIABLE","confidence":"high|medium|low","explanation":"one or two plain sentences naming the key figure or source","sources":[{"title":"","url":""}]}
+Use at most 3 sources, taken from your search.`;
+
+async function judge(body, env) {
+  if (!env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is not set on the worker');
+  const claim = String((body && body.claim) || '').slice(0, 600);
+  if (claim.split(/\s+/).length < 4) throw new Error('Claim is too short');
+  const context = String((body && body.context) || '').slice(0, 800);
+  const today = /^\d{4}-\d{2}-\d{2}$/.test((body && body.today) || '') ? body.today : new Date().toISOString().slice(0, 10);
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: env.JUDGE_MODEL || 'claude-sonnet-5-5',
+      max_tokens: 900,
+      system: JUDGE_PROMPT(today),
+      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3, blocked_domains: ['facebook.com', 'x.com', 'twitter.com', 'reddit.com', 'tiktok.com', 'instagram.com', 'youtube.com'] }],
+      messages: [{ role: 'user', content: `Claim: "${claim}"\n\nContext (video title and the lines just before it): ${context || 'none'}` }]
+    })
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error((j.error && j.error.message) || ('Anthropic returned ' + r.status));
+  const blocks = j.content || [];
+  const text = blocks.filter(b => b.type === 'text').map(b => b.text).join('');
+  const m = text.match(/\{[\s\S]*\}/);
+  if (!m) throw new Error('The research step did not return a verdict');
+  let out; try { out = JSON.parse(m[0]); } catch { throw new Error('The research step returned unreadable output'); }
+  const verdict = ['TRUE', 'MISLEADING', 'FALSE', 'UNVERIFIABLE'].includes(out.verdict) ? out.verdict : 'UNVERIFIABLE';
+  let sources = (Array.isArray(out.sources) ? out.sources : []).filter(s => s && /^https?:\/\//.test(s.url || '')).slice(0, 3);
+  if (!sources.length) { // fall back to what the search actually returned
+    const seen = new Set();
+    blocks.filter(b => b.type === 'web_search_tool_result' && Array.isArray(b.content)).forEach(b => b.content.forEach(x => {
+      if (x.url && !seen.has(x.url) && sources.length < 3) { seen.add(x.url); sources.push({ title: x.title || '', url: x.url }); }
+    }));
+  }
+  return { verdict, confidence: out.confidence || '', explanation: String(out.explanation || '').slice(0, 500), sources };
 }
 
 /* ---------- YouTube captions ---------- */

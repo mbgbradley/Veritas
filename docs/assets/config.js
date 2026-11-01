@@ -64,7 +64,8 @@ V.store = {
   get(k, d) { try { const v = localStorage.getItem('veritas.' + k); return v ? JSON.parse(v) : d; } catch { return d; } },
   set(k, v) { try { localStorage.setItem('veritas.' + k, JSON.stringify(v)); } catch {} }
 };
-V.config.local = { minSec: 5, maxSec: 14, quietRms: 0.008, maxQueue: 3 };   // free-mode chunking
+V.config.local = { minSec: 3, maxSec: 8, hardSec: 28, quietRms: 0.004 };   // free-mode chunking (seconds)
+V.config.judge = { maxPerSession: 30 };                                    // AI-researched claims per session (controls cost)
 V.settings = {
   localModel: V.store.get('localModel', '') || 'onnx-community/whisper-tiny.en',
   key: V.store.get('key', '') || V.config.defaults.key,        // Google API key (Fact Check Tools, YouTube Data)
