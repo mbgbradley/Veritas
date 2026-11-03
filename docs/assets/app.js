@@ -759,17 +759,18 @@
       const sents = splitSentences(text), span = Math.max(1, rec.secs), each = span / sents.length;
       sents.forEach((s, i) => ingestLive(s, 'A', rec.t + i * each));
     }
-    if (L.remote) setStatus(`free cloud Whisper · about ${Math.round(lag)}s behind`);
+    if (m.via) L.via = m.via;
+    if (L.remote) setStatus(`free cloud Whisper${L.via ? ' (' + L.via + ')' : ''} · about ${Math.round(lag)}s behind${L.via === 'workers-ai' ? ' · slower backup engine, add GROQ_API_KEY' : ''}`);
     else setStatus(`free mode · about ${Math.round(lag)}s behind${lwDevice === 'wasm' ? ' (CPU)' : ''}${L.avg > V.config.local.maxSec ? ' · this device is slow, try cloud mode' : ''}`);
     L.pump();
   }
   // Hosted Whisper: send one chunk to the service and feed the answer back through the same path as the on-device model.
   async function sendRemote(L, id, audio) {
-    let text = '', failed = '';
+    let text = '', failed = '', via = '';
     try {
       const r = await fetch(S.worker.replace(/\/$/, '') + '/transcribe', { method: 'POST', headers: { 'content-type': 'audio/wav' }, body: wavBlob(audio, 16000) });
       const j = await r.json().catch(() => ({}));
-      if (r.ok) text = j.text || '';
+      if (r.ok) { text = j.text || ''; via = j.via || ''; }
       else {
         failed = (j && j.error) || ('status ' + r.status);
         if (r.status === 429) L.holdUntil = performance.now() + Math.max(2, Math.min(30, j.retryAfter || 5)) * 1000;
@@ -789,7 +790,7 @@
       return;
     }
     L.fails = 0;
-    onLocalResult({ id, text });
+    onLocalResult({ id, text, via: via });
   }
   function stopLocal() {
     if (!local) return;
@@ -886,6 +887,7 @@
           add(j.anthropic ? 'ok' : 'warn', j.anthropic ? 'Claim research key is set (AI research tier on)' : 'Claim research key (ANTHROPIC_API_KEY) is not set. Without it only published fact-checks are used');
           add(j.supadata ? 'ok' : 'warn', j.supadata ? 'Hosted caption provider key is set' : 'Hosted caption provider key (SUPADATA_API_KEY) is not set. Recommended: YouTube often blocks direct caption access');
           if (j.groq || j.workersAi) {
+            if (!j.groq) add('warn', 'Groq key (GROQ_API_KEY) is NOT set on the worker, so only the slower Cloudflare backup is answering. Add the key for faster results (guide section 7)');
             add('ok', 'Free speech service is set up (' + [j.groq ? 'Groq' : '', j.workersAi ? 'Cloudflare Workers AI backup' : ''].filter(Boolean).join(' + ') + ')');
             try { // send one second of silence to prove the key works
               const r2 = await fetch(worker + '/transcribe', { method: 'POST', headers: { 'content-type': 'audio/wav' }, body: wavBlob(new Float32Array(16000), 16000) });
