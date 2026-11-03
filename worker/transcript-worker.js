@@ -5,8 +5,12 @@
 //   GET /article?url=https://…   -> readable text of a web article
 //   GET /deepgram-token          -> short-lived key so the browser can stream tab audio to Deepgram
 //   POST /judge                  -> researches one claim on the web and returns a verdict (needs ANTHROPIC_API_KEY)
+//   POST /transcribe             -> speech to text for one short audio chunk (WAV body). Free hosted Whisper:
+//                                   Groq first (GROQ_API_KEY), then Cloudflare Workers AI (binding named AI)
 //
 // Settings (Worker > Settings > Variables and Secrets):
+//   GROQ_API_KEY      (Secret)  free Whisper large-v3-turbo from console.groq.com (no card needed)
+//   AI                (Binding) optional backup: Settings > Bindings > Add > Workers AI, variable name AI
 //   SUPADATA_API_KEY  (Secret)  recommended: a hosted transcript provider. YouTube often blocks Cloudflare's
 //                               servers, so reading captions directly can fail; this route avoids that.
 //   ANTHROPIC_API_KEY (Secret)  lets Veritas research and judge claims no fact-checker has covered
@@ -40,9 +44,11 @@ export default {
       if (url.pathname === '/article') return json(await article(url.searchParams.get('url')), cors, 300);
       if (url.pathname === '/deepgram-token') return json(await deepgramToken(env), cors, 0);
       if (url.pathname === '/judge' && req.method === 'POST') return json(await judge(await req.json(), env), cors, 0);
-      return json({ ok: true, deepgram: !!env.DEEPGRAM_API_KEY, supadata: !!env.SUPADATA_API_KEY, anthropic: !!env.ANTHROPIC_API_KEY, originLocked: allowed !== '*', routes: ['/transcript?v=', '/article?url=', '/deepgram-token', 'POST /judge'] }, cors, 0);
+      if (url.pathname === '/transcribe' && req.method === 'POST') return json(await transcribe(req, url, env), cors, 0);
+      return json({ ok: true, groq: !!env.GROQ_API_KEY, workersAi: !!(env.AI && env.AI.run), deepgram: !!env.DEEPGRAM_API_KEY, supadata: !!env.SUPADATA_API_KEY, anthropic: !!env.ANTHROPIC_API_KEY, originLocked: allowed !== '*', routes: ['/transcript?v=', '/article?url=', '/deepgram-token', 'POST /judge', 'POST /transcribe'] }, cors, 0);
     } catch (e) {
-      return json({ error: String((e && e.message) || e) }, cors, 0, 502);
+      const status = (e && e.status) || 502;
+      return json({ error: String((e && e.message) || e), retryAfter: (e && e.retryAfter) || 0 }, cors, 0, status);
     }
   }
 };
@@ -65,6 +71,64 @@ async function deepgramToken(env) {
   const j = await r.json().catch(() => ({}));
   if (!r.ok || !j.access_token) throw new Error(j.err_msg || j.message || ('Deepgram returned ' + r.status));
   return { token: j.access_token };
+}
+
+/* ---------- Speech to text: free hosted Whisper (Groq, then Cloudflare Workers AI) ---------- */
+const MAX_AUDIO_BYTES = 2 * 1024 * 1024;   // a 12 s, 16 kHz, 16-bit mono chunk is about 380 KB
+
+async function transcribe(req, url, env) {
+  if (!env.GROQ_API_KEY && !(env.AI && env.AI.run)) {
+    throw httpError(501, 'No speech service is set up. Add GROQ_API_KEY (or a Workers AI binding named AI) to the worker');
+  }
+  const buf = await req.arrayBuffer();
+  if (buf.byteLength < 1000) throw httpError(400, 'Audio chunk is empty');
+  if (buf.byteLength > MAX_AUDIO_BYTES) throw httpError(413, 'Audio chunk is too large');
+  const lang = /^[a-z]{2}$/.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
+  const errors = [];
+  if (env.GROQ_API_KEY) {
+    try { return { ...(await viaGroq(buf, lang, env.GROQ_API_KEY)), via: 'groq' }; }
+    catch (e) { errors.push('groq: ' + (e.message || e)); if (!(env.AI && env.AI.run)) throw httpError(e.status || 502, errors.join('; '), e.retryAfter); }
+  }
+  try { return { ...(await viaWorkersAi(buf, lang, env.AI)), via: 'workers-ai', fallback: errors.length ? errors[0] : '' }; }
+  catch (e) { errors.push('workers-ai: ' + (e.message || e)); throw httpError(e.status || 502, errors.join('; ')); }
+}
+
+function httpError(status, message, retryAfter) { const e = new Error(message); e.status = status; if (retryAfter) e.retryAfter = retryAfter; return e; }
+
+// Whisper sometimes invents text during silence or music. Groq returns per-segment confidence; drop the doubtful ones.
+function keepSegment(s) {
+  if ((s.no_speech_prob || 0) > 0.6 && (s.avg_logprob || 0) < -1) return false;   // probably silence
+  if ((s.compression_ratio || 0) > 2.4) return false;                              // probably a repetition loop
+  return true;
+}
+
+async function viaGroq(buf, lang, key) {
+  const fd = new FormData();
+  fd.append('file', new Blob([buf], { type: 'audio/wav' }), 'chunk.wav');
+  fd.append('model', 'whisper-large-v3-turbo');
+  fd.append('response_format', 'verbose_json');
+  fd.append('temperature', '0');
+  fd.append('language', lang);
+  const r = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', { method: 'POST', headers: { Authorization: 'Bearer ' + key }, body: fd });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const e = new Error('HTTP ' + r.status + ' ' + ((j.error && j.error.message) || '').toString().slice(0, 140));
+    e.status = r.status === 429 ? 429 : 502;
+    const ra = parseFloat(r.headers.get('retry-after') || ''); if (ra) e.retryAfter = ra;
+    throw e;
+  }
+  const segs = Array.isArray(j.segments) ? j.segments : null;
+  const text = segs ? segs.filter(keepSegment).map(s => s.text).join(' ') : (j.text || '');
+  return { text: text.replace(/\s+/g, ' ').trim() };
+}
+
+async function viaWorkersAi(buf, lang, ai) {
+  const bytes = new Uint8Array(buf);
+  let bin = ''; for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  const out = await ai.run('@cf/openai/whisper-large-v3-turbo', { audio: btoa(bin), language: lang, task: 'transcribe' });
+  const segs = out && Array.isArray(out.segments) ? out.segments : null;
+  const text = segs ? segs.filter(keepSegment).map(s => s.text).join(' ') : ((out && out.text) || '');
+  return { text: text.replace(/\s+/g, ' ').trim() };
 }
 
 /* ---------- Claim research: Claude with web search ---------- */

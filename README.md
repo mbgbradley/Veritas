@@ -55,3 +55,7 @@ Without any setup you can still use the demo, red flags, **Check text**, and the
 - Transcription starts automatically when a video is opened (one Chrome share click). Newest line first; timestamps follow the video clock.
 - New AI research tier (Cloudflare secret `ANTHROPIC_API_KEY`, route `/judge`): claims without a published fact-check are researched on the web and labelled "AI research". Capped per session.
 - Real Whisper, Deepgram and web-search behavior was not tested from the build environment; use Test setup and report any message.
+
+
+## v7: free hosted transcription
+The worker has a new `POST /transcribe` route (Groq Whisper large-v3-turbo, with Cloudflare Workers AI as backup). The page sends short audio chunks to it instead of running a model on the Chromebook. Setup: GUIDE-CLOUDFLARE.md section 7.

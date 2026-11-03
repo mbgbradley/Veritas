@@ -65,7 +65,10 @@ V.store = {
   set(k, v) { try { localStorage.setItem('veritas.' + k, JSON.stringify(v)); } catch {} }
 };
 V.config.local = { minSec: 3, maxSec: 8, hardSec: 28, quietRms: 0.004 };   // free-mode chunking (seconds)
-V.config.judge = { maxPerSession: 30 };                                    // AI-researched claims per session (controls cost)
+// Hosted Whisper chunking (Groq's free tier allows 20 requests a minute; one request at a time and at least minSec
+// of audio per request keeps this well under that).
+V.config.remote = { minSec: 4, maxSec: 8, hardSec: 12, quietRms: 0.004 };
+V.config.judge ={ maxPerSession: 30 };                                    // AI-researched claims per session (controls cost)
 V.settings = {
   localModel: V.store.get('localModel', '') || 'onnx-community/whisper-tiny.en',
   key: V.store.get('key', '') || V.config.defaults.key,        // Google API key (Fact Check Tools, YouTube Data)

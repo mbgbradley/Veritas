@@ -126,6 +126,22 @@ Cost: each researched claim is one request with up to three web searches, roughl
 
 Click any video and Veritas starts listening automatically. Chrome still shows its share prompt once per video (it cannot be skipped): pick **This tab** and make sure audio sharing is on. If you decline, a "Start transcription" bar appears under the player.
 
-- With `DEEPGRAM_API_KEY` set: cloud transcription, words in about 1 to 2 seconds.
-- Without it: free on-device model. The first use downloads about 40 MB. Expect several seconds of delay; weak Chromebooks may lag more. Cloud mode is the way to get true real time.
+- With `GROQ_API_KEY` set (section 7): free hosted Whisper, text about 3 to 6 seconds behind. This is used first.
+- With `DEEPGRAM_API_KEY` set and no Groq/Workers AI: Deepgram, words in about 1 to 2 seconds (uses paid credit).
+- With neither: free on-device model. The first use downloads about 40 MB. Expect several seconds of delay; weak Chromebooks may lag more. Cloud mode is the way to get true real time.
 - Newest words are on the first line. Times are the video's own clock when the video is playing in this page.
+
+## 7. Free hosted Whisper (recommended: better accuracy, no lag on your Chromebook)
+
+Your Chromebook only captures the tab's audio. Short chunks (about 4 to 8 seconds, cut at pauses) go through your worker to Groq's free Whisper large-v3-turbo model, and the text comes back.
+
+1. Go to **console.groq.com**, sign up (no card needed at the time of writing), open **API Keys > Create API Key**, and copy it.
+2. Cloudflare > your worker > **Settings > Variables and Secrets > Add**: Type **Secret**, name `GROQ_API_KEY`, paste the key. Paste the updated `worker/transcript-worker.js` (Edit code) and **Deploy**.
+3. Optional backup, also free: worker **Settings > Bindings > Add > Workers AI**, variable name `AI`. If Groq is rate-limited or down, the worker uses this instead (about 3.5 hours of audio a day on Cloudflare's free allowance).
+4. Upload the new `docs/` files to GitHub. On the site, **Setup & settings > Test setup** should show "Free speech service is set up" and "Speech test passed (answered by groq)".
+5. Click a video, or press **Tab audio: free**, share the tab with audio on, and watch the status line: it should say "free cloud Whisper".
+
+Limits to know about (check Groq's current limits page, free tiers change):
+- Groq's free tier was listed at about 20 requests a minute and 28,800 audio-seconds a day, shared by everyone using your site. Veritas keeps one request in flight and at least 4 seconds of audio per request, so one viewer uses about 12 requests a minute and real-time audio.
+- If you hit a limit, the status line says so and Veritas retries and keeps the audio instead of dropping it.
+- Audio is sent to Groq (or Cloudflare) for transcription. Read their data terms before making the site public. Set `ALLOWED_ORIGIN` (section 2) so only your site can use your worker.

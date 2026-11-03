@@ -626,8 +626,27 @@
     if (++liveCount % 6 === 0) state.flags = V.flags.video(state.video || { title: '' }, transcriptText());
   }
 
-  // Best engine available: cloud when the service has a Deepgram key, otherwise the free on-device model.
-  function startAudio(self, quiet) { return (V.info && V.info.deepgram) ? startCloud({ self, quiet }) : startLocal({ self, quiet }); }
+  // Best free engine first: hosted Whisper through the service (Groq / Workers AI), then Deepgram if its key is set,
+  // then the on-device model.
+  const hasRemote = () => !!(S.worker && V.info && (V.info.groq || V.info.workersAi));
+  async function startAudio(self, quiet) {
+    // The service info loads in the background; give it a moment so we pick the right engine (Chrome needs the share prompt soon after the click).
+    if (V.infoPending) await Promise.race([V.infoPending, new Promise(r => setTimeout(r, 1500))]);
+    return hasRemote() || !(V.info && V.info.deepgram) ? startLocal({ self, quiet }) : startCloud({ self, quiet });
+  }
+
+  // 16-bit mono WAV from 16 kHz samples (what the speech service accepts).
+  function wavBlob(f32, rate) {
+    const n = f32.length, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+    const str = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+    str(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); str(8, 'WAVE'); str(12, 'fmt ');
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+    str(36, 'data'); v.setUint32(40, n * 2, true);
+    for (let i = 0; i < n; i++) v.setInt16(44 + i * 2, Math.max(-32768, Math.min(32767, Math.round(f32[i] * 32767))), true);
+    return new Blob([buf], { type: 'audio/wav' });
+  }
+  V.wavBlob = wavBlob;
 
   /* ---------- cloud ---------- */
   function stopTab() {
@@ -740,8 +759,37 @@
       const sents = splitSentences(text), span = Math.max(1, rec.secs), each = span / sents.length;
       sents.forEach((s, i) => ingestLive(s, 'A', rec.t + i * each));
     }
-    setStatus(`free mode · about ${Math.round(lag)}s behind${lwDevice === 'wasm' ? ' (CPU)' : ''}${L.avg > V.config.local.maxSec ? ' · this device is slow, try cloud mode' : ''}`);
+    if (L.remote) setStatus(`free cloud Whisper · about ${Math.round(lag)}s behind`);
+    else setStatus(`free mode · about ${Math.round(lag)}s behind${lwDevice === 'wasm' ? ' (CPU)' : ''}${L.avg > V.config.local.maxSec ? ' · this device is slow, try cloud mode' : ''}`);
     L.pump();
+  }
+  // Hosted Whisper: send one chunk to the service and feed the answer back through the same path as the on-device model.
+  async function sendRemote(L, id, audio) {
+    let text = '', failed = '';
+    try {
+      const r = await fetch(S.worker.replace(/\/$/, '') + '/transcribe', { method: 'POST', headers: { 'content-type': 'audio/wav' }, body: wavBlob(audio, 16000) });
+      const j = await r.json().catch(() => ({}));
+      if (r.ok) text = j.text || '';
+      else {
+        failed = (j && j.error) || ('status ' + r.status);
+        if (r.status === 429) L.holdUntil = performance.now() + Math.max(2, Math.min(30, j.retryAfter || 5)) * 1000;
+        else if (++L.fails >= 3) L.holdUntil = performance.now() + 10000;
+      }
+    } catch (e) { failed = e.message || 'network error'; if (++L.fails >= 3) L.holdUntil = performance.now() + 10000; }
+    if (local !== L) return;
+    if (failed) {
+      if (L.pend && L.pend.id === id) L.pend = null;
+      L.busy = false; L.lost++;
+      // Keep the audio and try again shortly, so a rate limit or a brief outage does not lose words.
+      const back = []; for (let i = 0; i < audio.length; i += 4096) back.push({ f: audio.slice(i, i + 4096), quiet: false });
+      L.blocks.unshift(...back);
+      setStatus('cloud Whisper problem: ' + failed.slice(0, 120) + (L.holdUntil > performance.now() ? ' · retrying shortly' : ''));
+      if (L.lost === 1 || L.lost % 5 === 0) toast('Transcription service: ' + failed.slice(0, 160));
+      setTimeout(() => { if (local === L) L.pump(); }, Math.max(300, (L.holdUntil || 0) - performance.now()));
+      return;
+    }
+    L.fails = 0;
+    onLocalResult({ id, text });
   }
   function stopLocal() {
     if (!local) return;
@@ -754,7 +802,8 @@
   async function startLocal(opts = {}) {
     const self = !!opts.self, bail = msg => { if (opts.quiet) showBanner(msg); else toast(msg); return false; };
     if (!canShare()) return bail('This browser cannot share tab audio. Use Chrome.');
-    if (!window.Worker) return bail('This browser cannot run the on-device model.');
+    const remote = hasRemote();
+    if (!remote && !window.Worker) return bail('This browser cannot run the on-device model.');
     stopTab();
     let stream;                      // ask for the audio first: Chrome only allows this right after a click
     try { stream = await navigator.mediaDevices.getDisplayMedia(shareOpts(self)); }
@@ -762,12 +811,12 @@
     const at = stream.getAudioTracks();
     if (!at.length) { stream.getTracks().forEach(x => x.stop()); return bail('No audio was shared. Choose the tab and tick "Also share tab audio".'); }
     prepCapture(self); hideBanner();
-    const cfgL = V.config.local, BLOCK = 4096, SEC = BLOCK / 16000, startMs = Date.now();
+    const cfgL = remote ? V.config.remote : V.config.local, BLOCK = 4096, SEC = BLOCK / 16000, startMs = Date.now();
     const ctx = new AudioContext({ sampleRate: 16000 });
     const src = ctx.createMediaStreamSource(new MediaStream(at));
     const proc = ctx.createScriptProcessor(BLOCK, 1, 1);
     const mute = ctx.createGain(); mute.gain.value = 0;
-    const L = local = { stream, ctx, proc, blocks: [], ready: false, busy: true, avg: 0, seq: 0, pend: null };
+    const L = local = { stream, ctx, proc, blocks: [], ready: false, busy: true, avg: 0, seq: 0, pend: null, remote, fails: 0, holdUntil: 0, lost: 0 };
     const btn = $('#btnLocal'); btn.textContent = 'Stop free capture'; btn.setAttribute('aria-pressed', 'true');
 
     const send = cut => {
@@ -779,11 +828,12 @@
       part.forEach((b, i) => audio.set(b.f, i * BLOCK));
       const id = ++L.seq; L.busy = true;
       L.pend = { id, t: Math.max(0, t), secs: part.length * SEC, sent: performance.now(), heard: heardEnd };
-      lw.postMessage({ type: 'run', id, audio }, [audio.buffer]);
+      if (L.remote) sendRemote(L, id, audio);
+      else lw.postMessage({ type: 'run', id, audio }, [audio.buffer]);
     };
     // Whenever the model is idle, send everything heard so far, cut at the last pause so words are not split.
     L.pump = () => {
-      if (local !== L || !L.ready || L.busy) return;
+      if (local !== L || !L.ready || L.busy || performance.now() < L.holdUntil) return;
       const bl = L.blocks, n = bl.length;
       if (n * SEC < cfgL.minSec) return;
       let tail = 0; for (let i = n - 1; i >= 0 && bl[i].quiet; i--) tail++;
@@ -806,6 +856,7 @@
     };
     src.connect(proc); proc.connect(mute); mute.connect(ctx.destination);
     at[0].addEventListener('ended', () => { if (local === L) stopLocal(); });
+    if (remote) { L.ready = true; L.busy = false; setStatus('free cloud Whisper · listening'); return true; }
     setStatus(lw && lwModel === S.localModel ? 'free mode · listening' : 'loading speech model (first time only)');
     ensureWorker().then(() => { if (local === L) { L.ready = true; L.busy = false; V.store.set('localUsed', true); setStatus('free mode · listening'); L.pump(); } })
       .catch(e => { if (local === L) { toast('Could not load the speech model: ' + e.message + '. It needs access to cdn.jsdelivr.net and huggingface.co.'); killLocalWorker(); stopLocal(); } });
@@ -834,7 +885,15 @@
           add('ok', 'Transcript service is running');
           add(j.anthropic ? 'ok' : 'warn', j.anthropic ? 'Claim research key is set (AI research tier on)' : 'Claim research key (ANTHROPIC_API_KEY) is not set. Without it only published fact-checks are used');
           add(j.supadata ? 'ok' : 'warn', j.supadata ? 'Hosted caption provider key is set' : 'Hosted caption provider key (SUPADATA_API_KEY) is not set. Recommended: YouTube often blocks direct caption access');
-          add(j.deepgram ? 'ok' : 'warn', j.deepgram ? 'Live tab-audio key is set' : 'Live tab-audio key (DEEPGRAM_API_KEY) is not set, needed only for live capture');
+          if (j.groq || j.workersAi) {
+            add('ok', 'Free speech service is set up (' + [j.groq ? 'Groq' : '', j.workersAi ? 'Cloudflare Workers AI backup' : ''].filter(Boolean).join(' + ') + ')');
+            try { // send one second of silence to prove the key works
+              const r2 = await fetch(worker + '/transcribe', { method: 'POST', headers: { 'content-type': 'audio/wav' }, body: wavBlob(new Float32Array(16000), 16000) });
+              const j2 = await r2.json().catch(() => ({}));
+              r2.ok ? add('ok', 'Speech test passed (answered by ' + (j2.via || 'the service') + (j2.fallback ? '; Groq failed: ' + j2.fallback : '') + ')') : add('bad', 'Speech test: ' + errMsg(r2, j2));
+            } catch (e) { add('bad', 'Speech test: ' + e.message); }
+          } else add('warn', 'Free speech service is not set up. Add GROQ_API_KEY to the worker (see GUIDE-CLOUDFLARE.md section 7). Until then, free mode runs on this device and is slower');
+          add(j.deepgram ? 'ok' : 'warn', j.deepgram ? 'Deepgram key is set (optional)' : 'Deepgram key (DEEPGRAM_API_KEY) is not set. Optional');
           const t = await get(worker + '/transcript?v=dQw4w9WgXcQ');
           t.r.ok && t.j.segments ? add('ok', `Captions work (${t.j.segments.length} lines read${t.j.via ? ' via ' + t.j.via : ''})`) : add('bad', 'Captions: ' + errMsg(t.r, t.j));
         }
@@ -889,13 +948,13 @@
   });
 
   function loadInfo() {
-    V.info = null;
+    V.info = null; V.infoPending = null;
     if (!S.worker) return;
-    fetch(S.worker.replace(/\/$/, '') + '/').then(r => r.json()).then(j => { if (j && j.ok) V.info = j; }).catch(() => {});
+    V.infoPending = fetch(S.worker.replace(/\/$/, '') + '/').then(r => r.json()).then(j => { if (j && j.ok) V.info = j; }).catch(() => {}).then(() => { V.infoPending = null; });
   }
   $('#audioBannerBtn').addEventListener('click', () => { hideBanner(); startAudio(true, false); });
   loadInfo();
-  if (V.store.get('localUsed', false) && 'Worker' in window) setTimeout(() => { if (!(V.info && V.info.deepgram)) ensureWorker().catch(() => {}); }, 2500);
+  if (V.store.get('localUsed', false) && 'Worker' in window) setTimeout(() => { if (!hasRemote() && !(V.info && V.info.deepgram)) ensureWorker().catch(() => {}); }, 2500);
   renderOutlets(); renderMeters(); renderTimeline(); renderCards();
   selectOutlet(state.outlets[0]);
   loadBrowse(false);
