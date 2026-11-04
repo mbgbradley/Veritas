@@ -44,6 +44,21 @@ V.checker = (() => {
     return 'MISLEADING';
   }
 
+  // Published fact-check rating -> 0-100 truth score, then kept inside the band of its verdict so colour, label and % agree.
+  function ratingScore(r) {
+    r = (r || '').toLowerCase();
+    if (/pants|fabricated|hoax/.test(r)) return 2;
+    if (/mostly false|mostly untrue|largely false/.test(r)) return 20;
+    if (/\b(false|incorrect|fake|wrong|baseless|not true|untrue|no evidence|scam|satire)/.test(r)) return 5;
+    if (/mostly true|largely true|mostly accurate/.test(r)) return 85;
+    if (/(half|mixture|mixed|partly|partially)/.test(r)) return 50;
+    if (/(misleading|missing context|out of context|exaggerat|needs context|lacks context|distort|unsupported|cherry|unproven)/.test(r)) return 45;
+    if (/(true|correct|accurate|right|legit)/.test(r)) return 95;
+    return 45;
+  }
+  const BAND = { TRUE: [75, 100], MISLEADING: [35, 74], FALSE: [0, 34] };
+  const bandScore = (verdict, n) => { const b = BAND[verdict]; return b && isFinite(n) ? Math.round(Math.min(b[1], Math.max(b[0], n))) : null; };
+
   const cache = new Map();
   async function factCheckSearch(text) {
     const q = text.length > 220 ? text.slice(0, 220) : text;
@@ -91,7 +106,8 @@ V.checker = (() => {
           const t = top3[0], ti = matchHost(host(t.url), V.config.checkers);
           const who = ti >= 0 ? V.config.checkers[ti].name : (t.publisher || 'A fact-checker');
           const detail = `${mixed ? 'Fact-checkers differ on similar claims. ' : ''}<b>${esc(who)}</b> rated a similar claim “${esc(t.rating || 'reviewed')}”: “${esc((t.claim || '').slice(0, 160))}”. Confirm it matches what was said.`;
-          return { verdict, detail, sources: top3.map(h => ({ url: h.url, label: (h.publisher || host(h.url)) + (h.rating ? ' · ' + h.rating : '') })) };
+          const sc = mixed ? top3.reduce((a, h) => a + ratingScore(h.rating), 0) / top3.length : ratingScore(t.rating);
+          return { verdict, detail, score: bandScore(verdict, sc), weight: 1, sources: top3.map(h => ({ url: h.url, label: (h.publisher || host(h.url)) + (h.rating ? ' · ' + h.rating : '') })) };
         }
       }
       // Tier 2: related reporting from a custom outlet list (optional; Google is retiring this API)
@@ -110,10 +126,9 @@ V.checker = (() => {
         const j = await V.yt.judge(text, ctx || '');
         const sources = (j.sources || []).map(s => ({ url: s.url, label: s.title || host(s.url) }));
         if (j.verdict === 'TRUE' || j.verdict === 'MISLEADING' || j.verdict === 'FALSE') {
-          return { verdict: j.verdict, sources,
-            detail: (j.engine === 'groq-wikipedia'
-              ? `<b>Limited AI check</b> using Wikipedia excerpts only, not a published fact-check and not a web search`
-              : `<b>AI research</b> using web sources, not a published fact-check`) + `${j.confidence ? ' (confidence: ' + esc(j.confidence) + ')' : ''}. ${esc(j.explanation)}` };
+          const label = { 'groq-wikipedia': 'Limited AI check</b> using Wikipedia excerpts only, not a web search', 'gemini-knowledge': 'Limited AI check</b> from the model’s own knowledge, with no live web search', 'gemini-grounded': 'AI research</b> using Google Search results through Gemini' }[j.engine] || 'AI research</b> using web sources';
+          return { verdict: j.verdict, sources, ai: true, score: bandScore(j.verdict, j.score), weight: j.confidence === 'high' ? 0.8 : 0.5,
+            detail: `<b>${label}, not a published fact-check${j.confidence ? ' (confidence: ' + esc(j.confidence) + ')' : ''}. ${esc(j.explanation)}` };
         }
         return { verdict: 'NOMATCH', sources, detail: `<b>Could not verify.</b> ${esc(j.explanation || 'Not enough reliable evidence found.')}` };
       }

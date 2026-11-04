@@ -43,11 +43,13 @@
     <div class="player" id="playerBox">
       <iframe id="frame" title="Video player" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>
       <div class="article-box" id="articleBox" hidden></div>
+      <div class="embed-box" id="embedBox" hidden></div>
       <div class="player-top"><span class="live" id="liveBadge">LIVE</span><span id="nowPlaying" class="now"></span><a id="openYT" class="open" target="_blank" rel="noopener">Open on YouTube ↗</a></div>
       <div class="player-empty" id="playerEmpty">Pick a trending video above, choose one from the schedule below, or paste a link.</div>
       <div id="lower" class="lower" role="status" aria-live="polite" hidden></div>
     </div>
 
+    <div class="audio-banner" id="socialHelp" hidden><span>Post not playing, or no text appearing? Open it in its own tab, press play there, then click Start transcription and choose that tab.</span><a class="btn" id="socialOpen" target="_blank" rel="noopener">Open post ↗</a><button type="button" class="btn primary" id="socialStart">Start transcription</button></div>
     <div class="audio-banner" id="audioBanner" hidden><span id="audioBannerText"></span><button type="button" class="btn primary" id="audioBannerBtn">Start transcription</button></div>
 
     <div class="timeline-wrap">

@@ -3,7 +3,7 @@
   --blue:#8CC4FF; --silver:#C5CBD3;
   --ink:#EEF2F7; --muted:#A9B4C2;
   --panel:rgba(18,24,33,.82); --panel-2:rgba(28,36,48,.88); --line:rgba(197,203,211,.22);
-  --true:#4CD98A; --mis:#FFC857; --false:#FF7B72; --none:#A9B4C2;
+  --true:#4CD98A; --mis:#FFA033; --false:#FF5C52; --none:#A9B4C2;
   --radius:12px;
 }
 *{box-sizing:border-box}
@@ -256,3 +256,15 @@ dialog textarea{width:100%;resize:vertical}
 @media (max-width:1000px){.trending{padding:10px 16px}}
 
 .player-empty[hidden]{display:none}
+
+/* color-coded fact-check cards: green true, orange misleading, red false */
+.card.c-TRUE,.card.c-MISLEADING,.card.c-FALSE{background:color-mix(in srgb,var(--c) 14%,var(--panel-2));border-color:color-mix(in srgb,var(--c) 70%,transparent)}
+.card .vh .pct{margin-left:auto;font-size:13px;font-weight:700;color:var(--c);white-space:nowrap}
+.card .vh .pct + .t{margin-left:8px}
+.card .sbar{height:6px;border-radius:3px;background:rgba(197,203,211,.18);overflow:hidden}
+.card .sbar i{display:block;height:100%;background:var(--c)}
+.card .askg{align-self:flex-start;background:none;border:1px solid var(--line);color:var(--ink);border-radius:6px;padding:3px 8px;font-size:12px;cursor:pointer}
+.card .askg:hover{border-color:var(--silver)}
+/* embedded TikTok / Instagram posts */
+.embed-box{position:absolute;inset:0;overflow:auto;display:flex;justify-content:center;align-items:flex-start;background:#0a0e14;padding:36px 8px 8px}
+.embed-box[hidden]{display:none}

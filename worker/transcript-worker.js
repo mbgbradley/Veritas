@@ -4,7 +4,8 @@
 //   GET /transcript?v=VIDEO_ID   -> YouTube captions as timed segments
 //   GET /article?url=https://…   -> readable text of a web article
 //   GET /deepgram-token          -> short-lived key so the browser can stream tab audio to Deepgram
-//   POST /judge                  -> researches one claim on the web and returns a verdict (needs ANTHROPIC_API_KEY)
+//   POST /judge                  -> researches one claim and returns a verdict + truth score. Uses ANTHROPIC_API_KEY (web search),
+//                                   else GEMINI_API_KEY (Google Search when the free key allows it), else GROQ_API_KEY (Wikipedia only)
 //   GET /social?url=https://tiktok.com/…  -> TikTok caption/author and short-link resolution (no key needed)
 //   POST /transcribe             -> speech to text for one short audio chunk (WAV body). Free hosted Whisper:
 //                                   Groq first (GROQ_API_KEY), then Cloudflare Workers AI (binding named AI)
@@ -47,7 +48,7 @@ export default {
       if (url.pathname === '/judge' && req.method === 'POST') return json(await judge(await req.json(), env), cors, 0);
       if (url.pathname === '/social') return json(await social(url.searchParams.get('url')), cors, 300);
       if (url.pathname === '/transcribe' && req.method === 'POST') return json(await transcribe(req, url, env), cors, 0);
-      return json({ ok: true, groq: !!env.GROQ_API_KEY, workersAi: !!(env.AI && env.AI.run), deepgram: !!env.DEEPGRAM_API_KEY, supadata: !!env.SUPADATA_API_KEY, anthropic: !!env.ANTHROPIC_API_KEY, judge: env.ANTHROPIC_API_KEY ? 'anthropic' : (env.GROQ_API_KEY ? 'groq' : ''), originLocked: allowed !== '*', routes: ['/transcript?v=', '/article?url=', '/deepgram-token', 'POST /judge', 'POST /transcribe', '/social?url='] }, cors, 0);
+      return json({ ok: true, groq: !!env.GROQ_API_KEY, workersAi: !!(env.AI && env.AI.run), deepgram: !!env.DEEPGRAM_API_KEY, supadata: !!env.SUPADATA_API_KEY, anthropic: !!env.ANTHROPIC_API_KEY, gemini: !!env.GEMINI_API_KEY, judge: env.ANTHROPIC_API_KEY ? 'anthropic' : (env.GEMINI_API_KEY ? 'gemini' : (env.GROQ_API_KEY ? 'groq' : '')), originLocked: allowed !== '*', routes: ['/transcript?v=', '/article?url=', '/deepgram-token', 'POST /judge', 'POST /transcribe', '/social?url='] }, cors, 0);
     } catch (e) {
       const status = (e && e.status) || 502;
       return json({ error: String((e && e.message) || e), retryAfter: (e && e.retryAfter) || 0 }, cors, 0, status);
@@ -133,6 +134,77 @@ async function viaWorkersAi(buf, lang, ai) {
   return { text: text.replace(/\s+/g, ' ').trim() };
 }
 
+/* ---------- Truth score (0-100) shared by every judge ----------
+   The model proposes a score; we clamp it into the band of its verdict so card colour, label and percentage always agree.
+   TRUE 75-98 (green), MISLEADING 35-74 (orange), FALSE 2-34 (red). No AI check is ever shown as 0 or 100. Rounded to 5. */
+const BANDS = { TRUE: [75, 98], MISLEADING: [35, 74], FALSE: [2, 34] };
+function scoreFor(verdict, raw) {
+  const b = BANDS[verdict]; if (!b) return null;
+  let n = Number(raw); if (!isFinite(n)) n = (b[0] + b[1]) / 2;
+  return Math.min(b[1], Math.max(b[0], Math.round(n / 5) * 5));
+}
+// Common clean-up: valid verdict, capped confidence, low confidence => no verdict.
+function finalizeJudgment(out, engine, maxConfidence) {
+  let verdict = ['TRUE', 'MISLEADING', 'FALSE', 'UNVERIFIABLE'].includes(out.verdict) ? out.verdict : 'UNVERIFIABLE';
+  let confidence = ['high', 'medium', 'low'].includes(out.confidence) ? out.confidence : 'low';
+  if (maxConfidence === 'medium' && confidence === 'high') confidence = 'medium';
+  let explanation = String(out.explanation || '').slice(0, 500);
+  if (verdict !== 'UNVERIFIABLE' && confidence === 'low') { explanation = 'Low confidence, so no verdict. ' + explanation; verdict = 'UNVERIFIABLE'; }
+  return { verdict, confidence, explanation, score: scoreFor(verdict, out.score), engine };
+}
+
+/* ---------- Gemini (free key from aistudio.google.com) ----------
+   Tries Google-Search-grounded answers first (real sources). If the key/project is not allowed to ground, falls back to a
+   knowledge-only answer, which is labelled as such and never counted with high confidence. */
+const GEMINI_PROMPT = (today, grounded) => `You are a careful, neutral fact-checker. Today is ${today}.
+You get ONE claim from an automatically transcribed political broadcast (names and numbers may be misheard).
+${grounded ? 'Use Google Search. Prefer primary and official sources (government data, court records, official statements), then established fact-checkers (AP, Reuters, PolitiFact, FactCheck.org, Snopes, Full Fact), then reputable news. Watch the time period and the exact wording.'
+  : 'You cannot search the web. Judge only from stable facts you are sure about. For recent events, latest figures, or anything you are unsure of, answer UNVERIFIABLE.'}
+Opinions, predictions and rhetoric are NOT checkable: answer UNVERIFIABLE.
+TRUE = accurate. MISLEADING = partly true, missing important context, or framed to give a wrong impression. FALSE = contradicted by reliable evidence. Prefer UNVERIFIABLE over a weak FALSE.
+"score" is how accurate the claim is, 0 to 100 (100 = fully accurate), and must agree with the verdict: TRUE 75-98, MISLEADING 35-74, FALSE 2-34.
+Reply with ONLY a JSON object, no other text:
+{"verdict":"TRUE|MISLEADING|FALSE|UNVERIFIABLE","confidence":"high|medium|low","score":0,"explanation":"one or two plain sentences naming the key figure or source"}`;
+
+async function geminiJudge(body, env) {
+  const claim = String((body && body.claim) || '').slice(0, 600);
+  if (claim.split(/\s+/).length < 4) throw new Error('Claim is too short');
+  const context = String((body && body.context) || '').slice(0, 800);
+  const today = /^\d{4}-\d{2}-\d{2}$/.test((body && body.today) || '') ? body.today : new Date().toISOString().slice(0, 10);
+  const plan = [];
+  if (env.GEMINI_GROUNDED_MODEL !== 'off') plan.push({ model: env.GEMINI_GROUNDED_MODEL || 'gemini-2.5-flash', search: true });
+  plan.push({ model: env.GEMINI_MODEL || 'gemini-3.5-flash-lite', search: false });
+  let res = null, used = null, lastErr = '';
+  for (const step of plan) {
+    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(step.model)}:generateContent`, {
+      method: 'POST', headers: { 'x-goog-api-key': env.GEMINI_API_KEY, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: GEMINI_PROMPT(today, step.search) }] },
+        contents: [{ role: 'user', parts: [{ text: `Claim: "${claim}"\n\nContext (video title and the line before it): ${context || 'none'}` }] }],
+        ...(step.search ? { tools: [{ google_search: {} }] } : {}),
+        generationConfig: { temperature: 0, maxOutputTokens: 1200 }
+      })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (r.ok) { res = j; used = step; break; }
+    lastErr = step.model + ': HTTP ' + r.status + ' ' + ((j.error && j.error.message) || '').toString().slice(0, 120);
+    if (![400, 403, 404, 429].includes(r.status)) throw httpError(502, 'Gemini: ' + lastErr);   // otherwise try the next option
+    if (!step.search && r.status === 429) throw httpError(429, 'Gemini: ' + lastErr);
+  }
+  if (!res) throw httpError(502, 'Gemini: ' + lastErr);
+  const cand = (res.candidates && res.candidates[0]) || {};
+  const text = ((cand.content && cand.content.parts) || []).map(p => p.text || '').join('');
+  const m = text.match(/\{[\s\S]*\}/);
+  if (!m) throw new Error('The research step did not return a verdict');
+  let out; try { out = JSON.parse(m[0]); } catch { throw new Error('The research step returned unreadable output'); }
+  const chunks = ((cand.groundingMetadata && cand.groundingMetadata.groundingChunks) || []).map(c => c.web).filter(w => w && /^https?:\/\//.test(w.uri || ''));
+  const grounded = used.search && chunks.length > 0;
+  const seen = new Set();
+  const sources = grounded ? chunks.filter(w => !seen.has(w.uri) && seen.add(w.uri)).slice(0, 3).map(w => ({ title: w.title || 'Source', url: w.uri })) : [];
+  const done = finalizeJudgment(out, grounded ? 'gemini-grounded' : 'gemini-knowledge', grounded ? 'high' : 'medium');
+  return { ...done, sources };
+}
+
 /* ---------- Free claim research: Groq model judging Wikipedia excerpts ----------
    Groq's built-in web-search models (Compound) were shut down on 21 Sept 2026, so this cannot browse the web.
    It fetches Wikipedia introductions for the claim and asks a Groq model to judge ONLY from them. It is deliberately
@@ -159,14 +231,15 @@ Rules:
 - Wikipedia introductions are often out of date for current events and latest figures. For those, answer UNVERIFIABLE.
 - TRUE only if the evidence clearly confirms the whole claim. FALSE only if the evidence clearly contradicts it. MISLEADING if the evidence shows it is partly right but missing important context.
 Reply with ONLY a JSON object, no other text:
-{"verdict":"TRUE|MISLEADING|FALSE|UNVERIFIABLE","confidence":"high|medium|low","explanation":"one or two plain sentences naming the evidence used","used":[1]}`;
+{"verdict":"TRUE|MISLEADING|FALSE|UNVERIFIABLE","confidence":"high|medium|low","score":0,"explanation":"one or two plain sentences naming the evidence used","used":[1]}
+"score" is how accurate the claim is, 0 to 100, and must agree with the verdict: TRUE 75-98, MISLEADING 35-74, FALSE 2-34.`;
 
 async function groqJudge(body, env) {
   const claim = String((body && body.claim) || '').slice(0, 600);
   if (claim.split(/\s+/).length < 4) throw new Error('Claim is too short');
   const today = /^\d{4}-\d{2}-\d{2}$/.test((body && body.today) || '') ? body.today : new Date().toISOString().slice(0, 10);
   const ev = await wikiEvidence(claim);
-  if (!ev.length) return { verdict: 'UNVERIFIABLE', confidence: 'low', explanation: 'No encyclopedia article matched this claim, so there was nothing to check it against.', sources: [], engine: 'groq-wikipedia' };
+  if (!ev.length) return { verdict: 'UNVERIFIABLE', confidence: 'low', explanation: 'No encyclopedia article matched this claim, so there was nothing to check it against.', score: null, sources: [], engine: 'groq-wikipedia' };
   const evidence = ev.map((e, i) => `[${i + 1}] ${e.title}: ${e.text}`).join('\n\n');
   const models = [...new Set([env.GROQ_JUDGE_MODEL, 'openai/gpt-oss-120b', 'openai/gpt-oss-20b'].filter(Boolean))];
   let j = null, lastErr = '';
@@ -185,13 +258,10 @@ async function groqJudge(body, env) {
   const m = text.match(/\{[\s\S]*\}/);
   if (!m) throw new Error('The research step did not return a verdict');
   let out; try { out = JSON.parse(m[0]); } catch { throw new Error('The research step returned unreadable output'); }
-  let verdict = ['TRUE', 'MISLEADING', 'FALSE', 'UNVERIFIABLE'].includes(out.verdict) ? out.verdict : 'UNVERIFIABLE';
-  const confidence = ['high', 'medium', 'low'].includes(out.confidence) ? out.confidence : 'low';
-  let explanation = String(out.explanation || '').slice(0, 500);
-  if (verdict !== 'UNVERIFIABLE' && confidence === 'low') { explanation = 'Low confidence, so no verdict. ' + explanation; verdict = 'UNVERIFIABLE'; }
+  const done = finalizeJudgment(out, 'groq-wikipedia', 'medium');
   const used = (Array.isArray(out.used) ? out.used : []).map(n => ev[n - 1]).filter(Boolean);
   const sources = (used.length ? used : ev.slice(0, 2)).slice(0, 3).map(e => ({ title: e.title + ' (Wikipedia)', url: e.url }));
-  return { verdict, confidence, explanation, sources, engine: 'groq-wikipedia' };
+  return { ...done, sources };
 }
 
 /* ---------- Social links: TikTok details (public oEmbed) and short-link resolution ---------- */
@@ -221,12 +291,14 @@ You are given ONE claim from an automatically transcribed political broadcast or
 3. Verdicts: TRUE = accurate; MISLEADING = partly true, missing important context, or framed in a way that gives a wrong impression; FALSE = contradicted by reliable evidence; UNVERIFIABLE = not enough reliable evidence, or not checkable. Prefer UNVERIFIABLE over a weak FALSE.
 
 Reply with ONLY a JSON object, no other text:
-{"verdict":"TRUE|MISLEADING|FALSE|UNVERIFIABLE","confidence":"high|medium|low","explanation":"one or two plain sentences naming the key figure or source","sources":[{"title":"","url":""}]}
+{"verdict":"TRUE|MISLEADING|FALSE|UNVERIFIABLE","confidence":"high|medium|low","score":0,"explanation":"one or two plain sentences naming the key figure or source","sources":[{"title":"","url":""}]}
+"score" is how accurate the claim is, 0 to 100 (100 = fully accurate), and must agree with the verdict: TRUE 75-98, MISLEADING 35-74, FALSE 2-34.
 Use at most 3 sources, taken from your search.`;
 
 async function judge(body, env) {
-  if (!env.ANTHROPIC_API_KEY && env.GROQ_API_KEY) return groqJudge(body, env);   // free, more limited
-  if (!env.ANTHROPIC_API_KEY) throw new Error('No claim-research key is set on the worker (GROQ_API_KEY or ANTHROPIC_API_KEY)');
+  if (!env.ANTHROPIC_API_KEY && env.GEMINI_API_KEY) return geminiJudge(body, env);   // free tier, Google Search when allowed
+  if (!env.ANTHROPIC_API_KEY && env.GROQ_API_KEY) return groqJudge(body, env);       // free, Wikipedia excerpts only
+  if (!env.ANTHROPIC_API_KEY) throw new Error('No claim-research key is set on the worker (GEMINI_API_KEY, GROQ_API_KEY or ANTHROPIC_API_KEY)');
   const claim = String((body && body.claim) || '').slice(0, 600);
   if (claim.split(/\s+/).length < 4) throw new Error('Claim is too short');
   const context = String((body && body.context) || '').slice(0, 800);
@@ -249,7 +321,7 @@ async function judge(body, env) {
   const m = text.match(/\{[\s\S]*\}/);
   if (!m) throw new Error('The research step did not return a verdict');
   let out; try { out = JSON.parse(m[0]); } catch { throw new Error('The research step returned unreadable output'); }
-  const verdict = ['TRUE', 'MISLEADING', 'FALSE', 'UNVERIFIABLE'].includes(out.verdict) ? out.verdict : 'UNVERIFIABLE';
+  const done = finalizeJudgment(out, 'anthropic-web', 'high');
   let sources = (Array.isArray(out.sources) ? out.sources : []).filter(s => s && /^https?:\/\//.test(s.url || '')).slice(0, 3);
   if (!sources.length) { // fall back to what the search actually returned
     const seen = new Set();
@@ -257,7 +329,7 @@ async function judge(body, env) {
       if (x.url && !seen.has(x.url) && sources.length < 3) { seen.add(x.url); sources.push({ title: x.title || '', url: x.url }); }
     }));
   }
-  return { verdict, confidence: out.confidence || '', explanation: String(out.explanation || '').slice(0, 500), sources };
+  return { ...done, sources };
 }
 
 /* ---------- YouTube captions ---------- */

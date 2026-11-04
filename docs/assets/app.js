@@ -78,11 +78,29 @@
   }
   function setFrame(o) {
     const f = $('#frame'); player = null;
-    f.hidden = false; $('#articleBox').hidden = true;
+    const eb = $('#embedBox'); eb.hidden = true; eb.innerHTML = '';
+    const useEmbed = o.type === 'social' && !!o.embed;
+    f.hidden = useEmbed; $('#articleBox').hidden = true;
     const ph = $('#playerEmpty'); if (ph) ph.hidden = true;
     f.onload = o.type === 'social' ? null : () => attach();      // the YouTube player API only applies to YouTube
-    f.src = embedUrl(o);
+    f.src = useEmbed ? 'about:blank' : embedUrl(o);
+    if (useEmbed) renderEmbed(o, eb);
     const a = $('#openYT'); a.hidden = false; a.href = openUrl(o); a.textContent = o.type === 'twitch' ? 'Open on Twitch ↗' : o.type === 'social' ? 'Open on ' + o.label + ' ↗' : 'Open on YouTube ↗';
+  }
+  // TikTok and Instagram: their documented embed markup plus their own embed.js (no login or token).
+  function loadEmbedScript(src, key) {
+    const old = document.getElementById('emb-' + key); if (old) old.remove();
+    const sc = document.createElement('script'); sc.id = 'emb-' + key; sc.async = true; sc.src = src; document.body.appendChild(sc);
+  }
+  function renderEmbed(o, eb) {
+    eb.hidden = false;
+    if (o.embed === 'tiktok') {
+      eb.innerHTML = `<blockquote class="tiktok-embed" cite="${esc(o.href)}" data-video-id="${esc(o.id)}" style="max-width:605px;min-width:325px;"><section></section></blockquote>`;
+      loadEmbedScript('https://www.tiktok.com/embed.js', 'tiktok');
+    } else if (o.embed === 'instagram') {
+      eb.innerHTML = `<blockquote class="instagram-media" data-instgrm-permalink="${esc(o.href)}" data-instgrm-version="14" style="width:100%;max-width:540px;min-width:326px;margin:0 auto"></blockquote>`;
+      if (window.instgrm && window.instgrm.Embeds) window.instgrm.Embeds.process(); else loadEmbedScript('https://www.instagram.com/embed.js', 'instagram');
+    }
   }
   const curTime = () => { try { return player && player.getCurrentTime ? player.getCurrentTime() : null; } catch { return null; } };
   function seek(t) { try { if (player && player.seekTo) { player.seekTo(t, true); player.playVideo(); } } catch {} }
@@ -96,7 +114,7 @@
     Q.items.length = 0; Q.gen++;
     state.cards = []; state.lines = []; state.seen = new Set(); state.flags = null; state.t0 = null;
     state.lastSegEnd = -1; state.docCount = 0; state.lastT = 0; state.activeLine = -1; cardSeq = 0; interimEl = null; state.newestFirst = false; liveCount = 0;
-    V.checker.resetBudget(); hideBanner();
+    V.checker.resetBudget(); hideBanner(); $('#socialHelp').hidden = true;
     state.timers.forEach(clearTimeout); state.timers = [];
     $('#lower').hidden = true; $('#capBody').innerHTML = EMPTY; setStatus('');
     schedule();
@@ -120,7 +138,7 @@
     try {
       const r = await V.checker.check(c.text, ctxFor(c));
       if (g !== Q.gen) return;
-      resolve(c, r.verdict, r.detail, r.sources);
+      resolve(c, r.verdict, r.detail, r.sources, r.score, r.weight, r.ai);
     } catch (e) {
       if (g !== Q.gen) return;
       resolve(c, 'NOMATCH', 'Lookup failed: ' + esc(e.message), []); errOnce(e.message);
@@ -131,8 +149,9 @@
     const title = state.video && state.video.title ? 'Video: ' + state.video.title + (state.video.channel ? ' (' + state.video.channel + ')' : '') + '. ' : '';
     return (title + (prev ? 'Previous line: ' + prev : '')).slice(0, 700);
   }
-  function resolve(c, verdict, detail, sources) {
+  function resolve(c, verdict, detail, sources, score, weight, ai) {
     c.verdict = verdict; c.detail = detail || ''; c.sources = sources || [];
+    c.score = score != null ? score : null; c.weight = weight != null ? weight : null; c.ai = !!ai;
     if (c.line) renderLine(c.line);
     if ((verdict === 'FALSE' || verdict === 'MISLEADING') && (state.mode !== 'video' || state.live || state.newestFirst)) showLower(c);
     schedule();
@@ -298,6 +317,7 @@
     state.mode = 'doc'; state.live = false;
     $('#frame').hidden = true; $('#liveBadge').hidden = true; $('#playerBox').classList.remove('vertical');
     const ph = $('#playerEmpty'); if (ph) ph.hidden = true;
+    $('#embedBox').hidden = true;
     const box = $('#articleBox'); box.hidden = false;
     box.innerHTML = `<div><div class="doc-kicker">Checking text</div><h2>${esc(title)}</h2>${link ? `<a href="${esc(link)}" target="_blank" rel="noopener">Open original ↗</a>` : ''}</div>`;
     $('#nowPlaying').textContent = title; $('#openYT').hidden = true;
@@ -327,12 +347,13 @@
     let meta = {};
     if (p.platform === 'tiktok' && S.worker) { try { meta = await V.yt.social(p.url); if (meta.id) p.id = meta.id; if (meta.url) p.url = meta.url; } catch {} }
     if (my !== state.openSeq) return;
-    let src = '';
-    if (p.platform === 'tiktok' && p.id) src = 'https://www.tiktok.com/embed/v2/' + p.id;
-    else if (p.platform === 'instagram') src = `https://www.instagram.com/${p.type || 'p'}/${p.id}/embed/`;
+    let src = '', embed = '';
+    if (p.platform === 'tiktok' && p.id) embed = 'tiktok';
+    else if (p.platform === 'instagram') { embed = 'instagram'; p.url = `https://www.instagram.com/${p.type || 'p'}/${p.id}/`; }
     else if (p.platform === 'facebook') src = 'https://www.facebook.com/plugins/video.php?show_text=false&autoplay=true&href=' + encodeURIComponent(p.url);
-    if (src) { setFrame({ type: 'social', src, href: p.url, label }); $('#nowPlaying').textContent = meta.title ? meta.title.slice(0, 120) : label + ' video'; }
+    if (embed || src) { setFrame({ type: 'social', embed, src, id: p.id, href: p.url, label }); $('#nowPlaying').textContent = meta.title ? meta.title.slice(0, 120) : label + ' video'; }
     else toast('Could not open that ' + label + ' link here. Open it in its own tab, press play, then use Tab audio: free and choose that tab.');
+    if (p.platform !== 'facebook') { $('#socialOpen').href = p.url; $('#socialHelp').hidden = false; }   // these embeds often will not play: offer the open-in-a-tab route up front
     const started = await audio;
     if (my !== state.openSeq) return;
     if (started) {
@@ -424,6 +445,13 @@
   }
 
   /* ================= FEED, METERS, FLAGS ================= */
+  // Zero-cost fallback: copy a ready-made fact-check prompt and open Gemini, where web search is built in.
+  function askGemini(c) {
+    const ctx = ctxFor(c);
+    const prompt = `Fact-check this statement from a political video or broadcast.\nStatement: "${c.text}"${ctx ? '\nContext: ' + ctx : ''}\n\nReply with: 1) Verdict: True, Misleading, False or Unverifiable. 2) A truth score from 0 to 100. 3) One or two sentences of explanation. 4) Two or three sources from credible, non-partisan outlets or official data, with links.`;
+    try { navigator.clipboard.writeText(prompt).then(() => toast('Prompt copied. Paste it into Gemini.'), () => toast('Could not copy. Paste the statement into Gemini yourself.')); } catch { toast('Could not copy. Paste the statement into Gemini yourself.'); }
+    window.open('https://gemini.google.com/app', '_blank', 'noopener');
+  }
   function renderCards() {
     const box = $('#cards'); box.innerHTML = '';
     let list = state.cards.filter(c => state.filter === 'all' || c.verdict === 'FALSE' || c.verdict === 'MISLEADING');
@@ -435,8 +463,13 @@
       const when = state.mode === 'doc' ? '' : fmt(c.t);
       const tags = c.flags.length ? `<div class="tags">${c.flags.map(f => `<span class="tagchip">${ICON.FLAG}${esc(f.label)}</span>`).join('')}</div>` : '';
       const srcs = c.sources.length ? `<div class="src">${c.sources.map(s => `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.label)}${s.bias ? ` <span class="bias" title="${esc(s.by || '')}">${esc(s.bias)}</span>` : ''} ↗</a>`).join('')}</div>` : '';
-      el.innerHTML = `<div class="vh">${ICON[c.verdict]}<span>${LABEL[c.verdict]}${sp}</span>${when ? `<button type="button" class="t">${when}</button>` : ''}</div>
-        <div class="q">“${esc(c.text)}”</div>${tags}${c.detail ? `<div class="d">${c.detail}</div>` : ''}${srcs}`;
+      const sc = c.verdict in DEFAULT_SCORE ? cardScore(c) : null;
+      const pct = sc != null ? `<span class="pct" title="${c.ai ? 'Estimated by AI' : 'From the published rating'}">${c.ai ? '≈ ' : ''}${sc}% true</span>` : '';
+      const bar = sc != null ? `<div class="sbar" role="img" aria-label="${sc} percent true"><i style="width:${sc}%"></i></div>` : '';
+      const ask = c.verdict === 'NOMATCH' ? '<button type="button" class="askg" title="Copies a ready-made prompt and opens Gemini">Ask Gemini ↗</button>' : '';
+      el.innerHTML = `<div class="vh">${ICON[c.verdict]}<span>${LABEL[c.verdict]}${sp}</span>${pct}${when ? `<button type="button" class="t">${when}</button>` : ''}</div>
+        <div class="q">“${esc(c.text)}”</div>${bar}${tags}${c.detail ? `<div class="d">${c.detail}</div>` : ''}${srcs}${ask}`;
+      const ag = el.querySelector('.askg'); if (ag) ag.addEventListener('click', () => askGemini(c));
       const tb = el.querySelector('.t'); if (tb) tb.addEventListener('click', () => focusCard(c));
       box.appendChild(el);
     });
@@ -452,13 +485,20 @@
     const [x1, y1] = p(a1), [x2, y2] = p(a2);
     return `M${x1.toFixed(1)} ${y1.toFixed(1)} A80 80 0 0 1 ${x2.toFixed(1)} ${y2.toFixed(1)}`;
   };
+  // Overall truth score = weighted average of the per-claim scores. Weight = how strong the evidence was (published fact-check 1.0,
+  // AI with high confidence 0.8, medium 0.5) x how check-worthy the claim is (numbers and specifics count up to twice as much).
+  const DEFAULT_SCORE = { TRUE: 92, MISLEADING: 55, FALSE: 8 };      // used only for sample/demo cards that carry no score
+  const cardScore = c => c.score != null ? c.score : DEFAULT_SCORE[c.verdict];
+  const cardWeight = c => (c.weight != null ? c.weight : 1) * (1 + Math.min(6, V.checker.priority(c.text)) / 6);
   function score(list) {
-    const T = list.filter(c => c.verdict === 'TRUE').length, M = list.filter(c => c.verdict === 'MISLEADING').length, F = list.filter(c => c.verdict === 'FALSE').length;
-    const n = T + M + F; return { n, s: n ? (T + 0.5 * M) / n : null };
+    const rated = list.filter(c => c.verdict in DEFAULT_SCORE);
+    if (!rated.length) return { n: 0, s: null };
+    let sw = 0, ss = 0; rated.forEach(c => { const w = cardWeight(c); sw += w; ss += w * cardScore(c); });
+    return { n: rated.length, s: ss / sw / 100 };
   }
   function gauge(sc) {
     const rot = sc.s === null ? 0 : -90 + 180 * sc.s;
-    return `<svg viewBox="0 0 200 115" role="img" aria-label="${sc.s === null ? 'No rated claims yet' : Math.round(sc.s * 100) + ' percent of rated claims held up'}">
+    return `<svg viewBox="0 0 200 115" role="img" aria-label="${sc.s === null ? 'No rated claims yet' : 'Overall truth score ' + Math.round(sc.s * 100) + ' percent'}">
       <path d="${arc(0, 58)}" stroke="var(--false)" stroke-width="16" fill="none"/><path d="${arc(62, 118)}" stroke="var(--mis)" stroke-width="16" fill="none"/><path d="${arc(122, 180)}" stroke="var(--true)" stroke-width="16" fill="none"/>
       <g class="needle" style="transform:rotate(${rot}deg)"><path d="M100 100 L100 32" stroke="#EEF2F7" stroke-width="4" stroke-linecap="round"/><circle cx="100" cy="100" r="8" fill="#EEF2F7"/></g></svg>`;
   }
@@ -466,7 +506,7 @@
     const box = $('#meters'), focus = document.activeElement && document.activeElement.dataset && document.activeElement.dataset.sp;
     const mk = (title, list, sp) => {
       const sc = score(list), head = sp ? `<input data-sp="${sp}" value="${esc(state.names[sp])}" aria-label="Name for speaker ${sp}">` : `<h3>${title}</h3>`;
-      return `<div class="meter">${head}${gauge(sc)}<div class="val">${sc.s === null ? '—' : Math.round(sc.s * 100) + '%'}</div><div class="sub">${sc.n} rated · held up</div></div>`;
+      return `<div class="meter">${head}${gauge(sc)}<div class="val">${sc.s === null ? '—' : Math.round(sc.s * 100) + '%'}</div><div class="sub">${sc.n} rated${sc.n && sc.n < 3 ? ' · early reading' : ''} · truth score</div></div>`;
     };
     if (state.debate) {
       box.innerHTML = mk('', state.cards.filter(c => c.speaker === 'A'), 'A') + mk('', state.cards.filter(c => c.speaker === 'B'), 'B');
@@ -937,7 +977,7 @@
         if (!r.ok || !j.ok) add('bad', 'Transcript service: ' + errMsg(r, j));
         else {
           add('ok', 'Transcript service is running');
-          add(j.anthropic || j.judge ? 'ok' : 'warn', j.anthropic ? 'Claim research key is set (AI research tier on)' : j.judge === 'groq' ? 'Claim research runs on your Groq key (free, limited: Wikipedia excerpts only, no web search)' : 'No claim research key. Without GROQ_API_KEY or ANTHROPIC_API_KEY only published fact-checks are used');
+          add(j.anthropic || j.judge ? 'ok' : 'warn', j.anthropic ? 'Claim research key is set (AI research tier on)' : j.judge === 'gemini' ? 'Claim research runs on your Gemini key (free tier: Google Search when your key allows it, otherwise the model’s own knowledge)' : j.judge === 'groq' ? 'Claim research runs on your Groq key (free, limited: Wikipedia excerpts only, no web search)' : 'No claim research key. Without GEMINI_API_KEY, GROQ_API_KEY or ANTHROPIC_API_KEY only published fact-checks are used');
           add(j.supadata ? 'ok' : 'warn', j.supadata ? 'Hosted caption provider key is set' : 'Hosted caption provider key (SUPADATA_API_KEY) is not set. Recommended: YouTube often blocks direct caption access');
           if (j.groq || j.workersAi) {
             if (!j.groq) add('warn', 'Groq key (GROQ_API_KEY) is NOT set on the worker, so only the slower Cloudflare backup is answering. Add the key for faster results (guide section 7)');
@@ -1009,6 +1049,7 @@
     if (!S.worker) return;
     V.infoPending = fetch(S.worker.replace(/\/$/, '') + '/').then(r => r.json()).then(j => { if (j && j.ok) V.info = j; }).catch(() => {}).then(() => { V.infoPending = null; });
   }
+  $('#socialStart').addEventListener('click', () => startAudio(false, false));
   $('#audioBannerBtn').addEventListener('click', () => { hideBanner(); startAudio(true, false); });
   loadInfo();
   if (V.store.get('localUsed', false) && 'Worker' in window) setTimeout(() => { if (!hasRemote() && !(V.info && V.info.deepgram)) ensureWorker().catch(() => {}); }, 2500);

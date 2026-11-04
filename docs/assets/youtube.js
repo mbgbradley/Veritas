@@ -61,6 +61,7 @@ V.yt = (() => {
           status: s.liveBroadcastContent || 'none',           // live | upcoming | none
           scheduledStart: l.scheduledStartTime || null, actualStart: l.actualStartTime || null, actualEnd: l.actualEndTime || null,
           views: +((v.statistics || {}).viewCount) || 0,
+          lang: (s.defaultAudioLanguage || s.defaultLanguage || '').toLowerCase(),
           thumb: (s.thumbnails.medium || s.thumbnails.default || {}).url
         };
       });
@@ -108,15 +109,25 @@ V.yt = (() => {
   // One search (100 quota units) + one details call (1 unit), cached 30 minutes in this browser.
   const lsGet = k => { try { const v = JSON.parse(localStorage.getItem(k)); return v && Date.now() - v.t < 1800000 ? v.d : null; } catch { return null; } };
   const lsSet = (k, d) => { try { localStorage.setItem(k, JSON.stringify({ t: Date.now(), d })); } catch {} };
+  // English only, so the audio can be transcribed. Uses the language YouTube has on record; when the uploader left it blank,
+  // falls back to a text check (Latin letters and a couple of common English words in the title/description).
+  const EN_WORDS = new Set('the and of to in is for on with that at as this new after says about from will over how why what are was were has have not his her their they you your who when more than into out up its by be it an or but'.split(' '));
+  function isEnglish(v) {
+    if (v.lang) return v.lang.startsWith('en');
+    const t = (v.title || '') + ' ' + (v.description || '').slice(0, 200);
+    const letters = (t.match(/\p{L}/gu) || []).length, latin = (t.match(/[A-Za-z]/g) || []).length;
+    if (!letters || latin / letters < 0.9) return false;
+    return (t.toLowerCase().match(/[a-z']+/g) || []).filter(w => EN_WORDS.has(w)).length >= 3;
+  }
   async function trending(force) {
-    const ck = 'veritas.trending';
+    const ck = 'veritas.trending.v2';
     if (!force) { const c = lsGet(ck); if (c) return c; }
     const after = new Date(Date.now() - 3 * 86400000).toISOString();
-    const j = await api('/search', { part: 'snippet', type: 'video', videoCategoryId: '25', order: 'viewCount', publishedAfter: after, regionCode: 'US', relevanceLanguage: 'en', maxResults: 30 });
+    const j = await api('/search', { part: 'snippet', type: 'video', videoCategoryId: '25', order: 'viewCount', publishedAfter: after, regionCode: 'US', relevanceLanguage: 'en', maxResults: 50 });
     const ids = (j.items || []).map(i => i.id && i.id.videoId).filter(Boolean);
     if (!ids.length) return [];
     const det = await details(ids);
-    const all = ids.map(id => det[id]).filter(v => v && !(v.duration > 0 && v.duration <= 62 && v.status === 'none'));
+    const all = ids.map(id => det[id]).filter(v => v && isEnglish(v) && !(v.duration > 0 && v.duration <= 62 && v.status === 'none'));
     const pol = V.config.politics;
     // political titles first, then the rest of the category, each group by views
     const rank = v => (pol.test(v.title) ? 0 : 1);
@@ -167,5 +178,5 @@ V.yt = (() => {
     return j;
   }
 
-  return { parseLink, one, details, feed, shorts, trending, social, transcript, article, deepgramToken, judge };
+  return { isEnglish, parseLink, one, details, feed, shorts, trending, social, transcript, article, deepgramToken, judge };
 })();
