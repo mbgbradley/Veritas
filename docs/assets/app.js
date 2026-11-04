@@ -58,10 +58,11 @@
   function embedUrl(o) {
     if (o.type === 'yt-channel') return `https://www.youtube.com/embed/live_stream?channel=${encodeURIComponent(o.ref)}&rel=0&enablejsapi=1` + originParam();
     if (o.type === 'yt-video') return `https://www.youtube.com/embed/${encodeURIComponent(o.ref)}?rel=0&playsinline=1&enablejsapi=1${o.autoplay ? '&autoplay=1' : ''}` + originParam();
+    if (o.type === 'social') return o.src || 'about:blank';
     if (o.type === 'twitch') return `https://player.twitch.tv/?channel=${encodeURIComponent(o.ref)}&parent=${encodeURIComponent(location.hostname || 'localhost')}&autoplay=false`;
     return 'about:blank';
   }
-  const openUrl = o => o.type === 'yt-channel' ? `https://www.youtube.com/channel/${o.ref}/live` : o.type === 'yt-video' ? `https://www.youtube.com/watch?v=${o.ref}` : `https://www.twitch.tv/${o.ref}`;
+  const openUrl = o => o.type === 'social' ? o.href : o.type === 'yt-channel' ? `https://www.youtube.com/channel/${o.ref}/live` : o.type === 'yt-video' ? `https://www.youtube.com/watch?v=${o.ref}` : `https://www.twitch.tv/${o.ref}`;
 
   window.onYouTubeIframeAPIReady = () => { ytReady = true; if (pendingAttach) attach(); };
   (function () { const s = document.createElement('script'); s.src = 'https://www.youtube.com/iframe_api'; s.async = true; document.head.appendChild(s); })();
@@ -78,9 +79,10 @@
   function setFrame(o) {
     const f = $('#frame'); player = null;
     f.hidden = false; $('#articleBox').hidden = true;
-    f.onload = () => attach();
+    const ph = $('#playerEmpty'); if (ph) ph.hidden = true;
+    f.onload = o.type === 'social' ? null : () => attach();      // the YouTube player API only applies to YouTube
     f.src = embedUrl(o);
-    const a = $('#openYT'); a.hidden = false; a.href = openUrl(o); a.textContent = o.type === 'twitch' ? 'Open on Twitch ↗' : 'Open on YouTube ↗';
+    const a = $('#openYT'); a.hidden = false; a.href = openUrl(o); a.textContent = o.type === 'twitch' ? 'Open on Twitch ↗' : o.type === 'social' ? 'Open on ' + o.label + ' ↗' : 'Open on YouTube ↗';
   }
   const curTime = () => { try { return player && player.getCurrentTime ? player.getCurrentTime() : null; } catch { return null; } };
   function seek(t) { try { if (player && player.seekTo) { player.seekTo(t, true); player.playVideo(); } } catch {} }
@@ -254,7 +256,7 @@
       }
     }
     state.flags = V.flags.video(meta, transcriptText());
-    if (!S.key && !(V.info && V.info.anthropic)) toast('Add a Google API key in Setup & settings (page footer) to look up fact-checks.');
+    if (!S.key && !(V.info && (V.info.anthropic || V.info.judge))) toast('Add a Google API key in Setup & settings (page footer) to look up fact-checks.');
     schedule();
   }
   function ingestMetadata(meta) {
@@ -295,6 +297,7 @@
   function showDoc(title, link) {
     state.mode = 'doc'; state.live = false;
     $('#frame').hidden = true; $('#liveBadge').hidden = true; $('#playerBox').classList.remove('vertical');
+    const ph = $('#playerEmpty'); if (ph) ph.hidden = true;
     const box = $('#articleBox'); box.hidden = false;
     box.innerHTML = `<div><div class="doc-kicker">Checking text</div><h2>${esc(title)}</h2>${link ? `<a href="${esc(link)}" target="_blank" rel="noopener">Open original ↗</a>` : ''}</div>`;
     $('#nowPlaying').textContent = title; $('#openYT').hidden = true;
@@ -309,6 +312,35 @@
     state.flags = V.flags.video({ title, description: '' }, paragraphs.join(' '));
     schedule();
     if (!S.key) toast('Add a Google API key in Setup & settings (page footer) to look up fact-checks.');
+  }
+  /* ---------- TikTok / Instagram / Facebook: official embed player + tab-audio capture ---------- */
+  const SOCIAL = { tiktok: 'TikTok', instagram: 'Instagram', facebook: 'Facebook' };
+  async function openSocial(p) {
+    const my = ++state.openSeq, label = SOCIAL[p.platform];
+    reset(); state.mode = 'session'; state.live = false; state.short = false;
+    $('#playerBox').classList.toggle('vertical', p.platform === 'tiktok');
+    $('#liveBadge').hidden = true; $('#nowPlaying').textContent = label + ' video';
+    $('#capBody').innerHTML = '<p class="empty">Starting…</p>'; setStatus('starting');
+    $('#stage').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    // Start listening inside the click (Chrome only allows the share prompt right after one). The embed loads while you answer it.
+    const audio = startAudio(true, true);
+    let meta = {};
+    if (p.platform === 'tiktok' && S.worker) { try { meta = await V.yt.social(p.url); if (meta.id) p.id = meta.id; if (meta.url) p.url = meta.url; } catch {} }
+    if (my !== state.openSeq) return;
+    let src = '';
+    if (p.platform === 'tiktok' && p.id) src = 'https://www.tiktok.com/embed/v2/' + p.id;
+    else if (p.platform === 'instagram') src = `https://www.instagram.com/${p.type || 'p'}/${p.id}/embed/`;
+    else if (p.platform === 'facebook') src = 'https://www.facebook.com/plugins/video.php?show_text=false&autoplay=true&href=' + encodeURIComponent(p.url);
+    if (src) { setFrame({ type: 'social', src, href: p.url, label }); $('#nowPlaying').textContent = meta.title ? meta.title.slice(0, 120) : label + ' video'; }
+    else toast('Could not open that ' + label + ' link here. Open it in its own tab, press play, then use Tab audio: free and choose that tab.');
+    const started = await audio;
+    if (my !== state.openSeq) return;
+    if (started) {
+      toast('If the video is paused, press play in the player. Times count from when transcription started.');
+      setTimeout(() => {
+        if (my === state.openSeq && !liveCount && (local || tab)) showBanner('No speech heard yet. If the video did not load or will not play here, open it in its own tab, play it, then click Start transcription and choose that tab.');
+      }, 20000);
+    }
   }
   async function openArticle(url) {
     if (!S.worker) { toast('Add a Transcript service URL in Setup & settings (page footer) to fetch articles, or paste the text into Check text.'); return; }
@@ -458,7 +490,7 @@
 
   /* ================= OUTLETS ================= */
   function renderOutlets() {
-    const box = $('#outletList'); box.innerHTML = '';
+    const box = $('#outletList'); if (!box) return; box.innerHTML = '';
     state.outlets.forEach(o => {
       const b = document.createElement('button'); b.className = 'chip'; b.type = 'button';
       if (state.current && state.current.id === o.id) b.setAttribute('aria-current', 'true');
@@ -531,6 +563,27 @@
       });
       g.appendChild(card);
     });
+  }
+  /* ---------- trending political videos (top of page) ---------- */
+  const fmtViews = n => n >= 1e6 ? (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M' : n >= 1e3 ? Math.round(n / 1e3) + 'K' : String(n || 0);
+  const ago = iso => { const h = Math.max(1, Math.round((Date.now() - new Date(iso)) / 3600000)); return h < 48 ? h + 'h ago' : Math.round(h / 24) + 'd ago'; };
+  function renderTrending() {
+    const box = $('#trendList'); box.innerHTML = '';
+    const items = state.trend || [];
+    if (!items.length) { box.innerHTML = '<p class="heads-msg">No trending political videos found.</p>'; return; }
+    items.forEach((v, i) => {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'tcard';
+      b.innerHTML = `<span class="rk">#${i + 1}</span><img src="${esc(v.thumb || '')}" alt=""><span class="tt">${esc(v.title)}</span><span class="ts2">${esc(v.channel)} · ${fmtViews(v.views)} views · ${esc(ago(v.publishedAt))}</span>`;
+      b.addEventListener('click', () => openVideo(v, { live: v.status === 'live' }));
+      box.appendChild(b);
+    });
+  }
+  async function loadTrending(force) {
+    const box = $('#trendList');
+    if (!S.key) { box.innerHTML = '<p class="heads-msg">Add your Google API key in Setup &amp; settings (page footer) to load trending videos.</p>'; return; }
+    box.innerHTML = '<p class="heads-msg">Loading…</p>';
+    try { state.trend = await V.yt.trending(force); renderTrending(); }
+    catch (e) { box.innerHTML = `<p class="heads-msg">Could not load trending videos: ${esc(e.message)}</p>`; }
   }
   function renderShorts() {
     const g = $('#shortsGrid');
@@ -884,7 +937,7 @@
         if (!r.ok || !j.ok) add('bad', 'Transcript service: ' + errMsg(r, j));
         else {
           add('ok', 'Transcript service is running');
-          add(j.anthropic ? 'ok' : 'warn', j.anthropic ? 'Claim research key is set (AI research tier on)' : 'Claim research key (ANTHROPIC_API_KEY) is not set. Without it only published fact-checks are used');
+          add(j.anthropic || j.judge ? 'ok' : 'warn', j.anthropic ? 'Claim research key is set (AI research tier on)' : j.judge === 'groq' ? 'Claim research runs on your Groq key (free, limited: Wikipedia excerpts only, no web search)' : 'No claim research key. Without GROQ_API_KEY or ANTHROPIC_API_KEY only published fact-checks are used');
           add(j.supadata ? 'ok' : 'warn', j.supadata ? 'Hosted caption provider key is set' : 'Hosted caption provider key (SUPADATA_API_KEY) is not set. Recommended: YouTube often blocks direct caption access');
           if (j.groq || j.workersAi) {
             if (!j.groq) add('warn', 'Groq key (GROQ_API_KEY) is NOT set on the worker, so only the slower Cloudflare backup is answering. Add the key for faster results (guide section 7)');
@@ -911,6 +964,7 @@
     const p = V.yt.parseLink($('#omniIn').value);
     if (p.kind === 'video') openVideo({ id: p.id, status: 'none' });
     else if (p.kind === 'short') openVideo({ id: p.id, status: 'none' }, { short: true });
+    else if (p.kind === 'social') openSocial(p);
     else if (p.kind === 'article') openArticle(p.url);
     else if (p.kind === 'text') openText(p.text);
   });
@@ -927,13 +981,14 @@
   document.querySelectorAll('.seg button').forEach(b => b.addEventListener('click', () => { state.filter = b.dataset.f; syncSeg(); renderCards(); }));
   document.querySelectorAll('.tabs [role=tab]').forEach(b => b.addEventListener('click', () => setTab(b.dataset.tab)));
   $('#btnRefresh').addEventListener('click', () => loadBrowse(true));
+  $('#btnTrend').addEventListener('click', () => loadTrending(true));
 
   $('#btnSettings').addEventListener('click', () => { $('#selfTest').innerHTML = ''; $('#keyInput').value = S.key; $('#cxInput').value = S.cx; $('#modelInput').value = S.localModel; $('#workerInput').value = S.worker; $('#dlgSettings').showModal(); });
   $('#saveKey').addEventListener('click', () => {
     S.key = $('#keyInput').value.trim(); S.cx = $('#cxInput').value.trim(); S.worker = $('#workerInput').value.trim();
     const mdl = $('#modelInput').value; if (mdl !== S.localModel) { S.localModel = mdl; stopLocal(); killLocalWorker(); }
     V.saveSettings();
-    toast('Saved in this browser.'); loadInfo(); state.feed = null; state.shorts = null; loadBrowse(true);
+    toast('Saved in this browser.'); loadInfo(); state.feed = null; state.shorts = null; loadBrowse(true); loadTrending(false);
   });
   $('#btnText').addEventListener('click', () => $('#dlgText').showModal());
   $('#runText').addEventListener('click', () => { const t = $('#textIn').value.trim(); if (t) openText(t); });
@@ -958,6 +1013,6 @@
   loadInfo();
   if (V.store.get('localUsed', false) && 'Worker' in window) setTimeout(() => { if (!hasRemote() && !(V.info && V.info.deepgram)) ensureWorker().catch(() => {}); }, 2500);
   renderOutlets(); renderMeters(); renderTimeline(); renderCards();
-  selectOutlet(state.outlets[0]);
+  loadTrending(false);
   loadBrowse(false);
 })();

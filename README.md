@@ -59,3 +59,7 @@ Without any setup you can still use the demo, red flags, **Check text**, and the
 
 ## v7: free hosted transcription
 The worker has a new `POST /transcribe` route (Groq Whisper large-v3-turbo, with Cloudflare Workers AI as backup). The page sends short audio chunks to it instead of running a model on the Chromebook. Setup: GUIDE-CLOUDFLARE.md section 7.
+
+
+## v8
+Groq+Wikipedia claim judge (worker), TikTok/Instagram/Facebook links, trending top-10 strip replacing the outlet bar, green for True, tighter transcript lines, transcript buttons moved below the schedule. See GUIDE-CLOUDFLARE.md sections 8 to 10.

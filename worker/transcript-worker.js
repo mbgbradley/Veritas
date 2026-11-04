@@ -5,6 +5,7 @@
 //   GET /article?url=https://…   -> readable text of a web article
 //   GET /deepgram-token          -> short-lived key so the browser can stream tab audio to Deepgram
 //   POST /judge                  -> researches one claim on the web and returns a verdict (needs ANTHROPIC_API_KEY)
+//   GET /social?url=https://tiktok.com/…  -> TikTok caption/author and short-link resolution (no key needed)
 //   POST /transcribe             -> speech to text for one short audio chunk (WAV body). Free hosted Whisper:
 //                                   Groq first (GROQ_API_KEY), then Cloudflare Workers AI (binding named AI)
 //
@@ -44,8 +45,9 @@ export default {
       if (url.pathname === '/article') return json(await article(url.searchParams.get('url')), cors, 300);
       if (url.pathname === '/deepgram-token') return json(await deepgramToken(env), cors, 0);
       if (url.pathname === '/judge' && req.method === 'POST') return json(await judge(await req.json(), env), cors, 0);
+      if (url.pathname === '/social') return json(await social(url.searchParams.get('url')), cors, 300);
       if (url.pathname === '/transcribe' && req.method === 'POST') return json(await transcribe(req, url, env), cors, 0);
-      return json({ ok: true, groq: !!env.GROQ_API_KEY, workersAi: !!(env.AI && env.AI.run), deepgram: !!env.DEEPGRAM_API_KEY, supadata: !!env.SUPADATA_API_KEY, anthropic: !!env.ANTHROPIC_API_KEY, originLocked: allowed !== '*', routes: ['/transcript?v=', '/article?url=', '/deepgram-token', 'POST /judge', 'POST /transcribe'] }, cors, 0);
+      return json({ ok: true, groq: !!env.GROQ_API_KEY, workersAi: !!(env.AI && env.AI.run), deepgram: !!env.DEEPGRAM_API_KEY, supadata: !!env.SUPADATA_API_KEY, anthropic: !!env.ANTHROPIC_API_KEY, judge: env.ANTHROPIC_API_KEY ? 'anthropic' : (env.GROQ_API_KEY ? 'groq' : ''), originLocked: allowed !== '*', routes: ['/transcript?v=', '/article?url=', '/deepgram-token', 'POST /judge', 'POST /transcribe', '/social?url='] }, cors, 0);
     } catch (e) {
       const status = (e && e.status) || 502;
       return json({ error: String((e && e.message) || e), retryAfter: (e && e.retryAfter) || 0 }, cors, 0, status);
@@ -131,6 +133,85 @@ async function viaWorkersAi(buf, lang, ai) {
   return { text: text.replace(/\s+/g, ' ').trim() };
 }
 
+/* ---------- Free claim research: Groq model judging Wikipedia excerpts ----------
+   Groq's built-in web-search models (Compound) were shut down on 21 Sept 2026, so this cannot browse the web.
+   It fetches Wikipedia introductions for the claim and asks a Groq model to judge ONLY from them. It is deliberately
+   cautious: anything it is not fairly sure about comes back UNVERIFIABLE. */
+const WIKI_UA = 'VeritasFactCheck/1.0 (non-commercial demo project)';
+async function wikiEvidence(claim) {
+  const q = claim.replace(/[^\w\s$%.,'-]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 250);
+  const sr = await fetch('https://en.wikipedia.org/w/api.php?action=query&list=search&format=json&utf8=1&srlimit=3&srsearch=' + encodeURIComponent(q), { headers: { 'user-agent': WIKI_UA } });
+  const sj = await sr.json().catch(() => ({}));
+  const hits = (sj.query && sj.query.search) || [];
+  if (!hits.length) return [];
+  const er = await fetch('https://en.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&exchars=1400&format=json&utf8=1&pageids=' + hits.map(h => h.pageid).join('|'), { headers: { 'user-agent': WIKI_UA } });
+  const ej = await er.json().catch(() => ({}));
+  const pages = (ej.query && ej.query.pages) || {};
+  return hits.map(h => pages[h.pageid]).filter(p => p && p.extract)
+    .map(p => ({ title: p.title, url: 'https://en.wikipedia.org/wiki/' + encodeURIComponent(p.title.replace(/ /g, '_')), text: p.extract.replace(/\s+/g, ' ').trim() }));
+}
+
+const GROQ_JUDGE_PROMPT = today => `You are a careful, neutral fact-checker. Today is ${today}.
+You get ONE claim from an automatically transcribed political video (names and numbers may be misheard) and numbered EVIDENCE excerpts from Wikipedia.
+Rules:
+- Use ONLY the evidence. Do not use memory or outside knowledge.
+- Opinions, predictions, rhetoric, or claims whose specific figures, names or time period the evidence does not directly address: UNVERIFIABLE.
+- Wikipedia introductions are often out of date for current events and latest figures. For those, answer UNVERIFIABLE.
+- TRUE only if the evidence clearly confirms the whole claim. FALSE only if the evidence clearly contradicts it. MISLEADING if the evidence shows it is partly right but missing important context.
+Reply with ONLY a JSON object, no other text:
+{"verdict":"TRUE|MISLEADING|FALSE|UNVERIFIABLE","confidence":"high|medium|low","explanation":"one or two plain sentences naming the evidence used","used":[1]}`;
+
+async function groqJudge(body, env) {
+  const claim = String((body && body.claim) || '').slice(0, 600);
+  if (claim.split(/\s+/).length < 4) throw new Error('Claim is too short');
+  const today = /^\d{4}-\d{2}-\d{2}$/.test((body && body.today) || '') ? body.today : new Date().toISOString().slice(0, 10);
+  const ev = await wikiEvidence(claim);
+  if (!ev.length) return { verdict: 'UNVERIFIABLE', confidence: 'low', explanation: 'No encyclopedia article matched this claim, so there was nothing to check it against.', sources: [], engine: 'groq-wikipedia' };
+  const evidence = ev.map((e, i) => `[${i + 1}] ${e.title}: ${e.text}`).join('\n\n');
+  const models = [...new Set([env.GROQ_JUDGE_MODEL, 'openai/gpt-oss-120b', 'openai/gpt-oss-20b'].filter(Boolean))];
+  let j = null, lastErr = '';
+  for (const model of models) {
+    const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST', headers: { Authorization: 'Bearer ' + env.GROQ_API_KEY, 'content-type': 'application/json' },
+      body: JSON.stringify({ model, temperature: 0, max_tokens: 1500, messages: [{ role: 'system', content: GROQ_JUDGE_PROMPT(today) }, { role: 'user', content: `Claim: "${claim}"\n\nEVIDENCE:\n${evidence}` }] })
+    });
+    const out = await r.json().catch(() => ({}));
+    if (r.ok) { j = out; break; }
+    lastErr = 'HTTP ' + r.status + ' ' + ((out.error && out.error.message) || '').toString().slice(0, 120);
+    if (r.status !== 400 && r.status !== 404) throw httpError(r.status === 429 ? 429 : 502, 'Groq judge: ' + lastErr);   // only try the next model if this one is unknown
+  }
+  if (!j) throw httpError(502, 'Groq judge: ' + lastErr);
+  const text = (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || '';
+  const m = text.match(/\{[\s\S]*\}/);
+  if (!m) throw new Error('The research step did not return a verdict');
+  let out; try { out = JSON.parse(m[0]); } catch { throw new Error('The research step returned unreadable output'); }
+  let verdict = ['TRUE', 'MISLEADING', 'FALSE', 'UNVERIFIABLE'].includes(out.verdict) ? out.verdict : 'UNVERIFIABLE';
+  const confidence = ['high', 'medium', 'low'].includes(out.confidence) ? out.confidence : 'low';
+  let explanation = String(out.explanation || '').slice(0, 500);
+  if (verdict !== 'UNVERIFIABLE' && confidence === 'low') { explanation = 'Low confidence, so no verdict. ' + explanation; verdict = 'UNVERIFIABLE'; }
+  const used = (Array.isArray(out.used) ? out.used : []).map(n => ev[n - 1]).filter(Boolean);
+  const sources = (used.length ? used : ev.slice(0, 2)).slice(0, 3).map(e => ({ title: e.title + ' (Wikipedia)', url: e.url }));
+  return { verdict, confidence, explanation, sources, engine: 'groq-wikipedia' };
+}
+
+/* ---------- Social links: TikTok details (public oEmbed) and short-link resolution ---------- */
+const TIKTOK_HOST = /(^|\.)tiktok\.com$/i;
+async function social(target) {
+  let u; try { u = new URL(target); } catch { throw httpError(400, 'Bad URL'); }
+  if (!/^https?:$/.test(u.protocol) || !TIKTOK_HOST.test(u.hostname)) throw httpError(400, 'Only TikTok links are looked up here');
+  for (let i = 0; i < 4 && !/\/video\/\d+/.test(u.pathname); i++) {      // follow short links (vm.tiktok.com/…) by hand, staying on tiktok.com
+    const r = await fetch(u.toString(), { redirect: 'manual', headers: { 'user-agent': 'Mozilla/5.0 (compatible; VeritasBot/1.0)' } });
+    const loc = r.headers.get('location'); if (!loc) break;
+    const nu = new URL(loc, u); if (!TIKTOK_HOST.test(nu.hostname)) break;
+    u = nu;
+  }
+  const canonical = u.origin + u.pathname;
+  const idm = u.pathname.match(/\/video\/(\d+)/);
+  let meta = {};
+  try { const r = await fetch('https://www.tiktok.com/oembed?url=' + encodeURIComponent(canonical)); if (r.ok) meta = await r.json(); } catch { /* optional */ }
+  return { platform: 'tiktok', url: canonical, id: idm ? idm[1] : '', title: String(meta.title || ''), author: String(meta.author_name || ''), thumb: String(meta.thumbnail_url || '') };
+}
+
 /* ---------- Claim research: Claude with web search ---------- */
 const JUDGE_PROMPT = (today) => `You are a careful, neutral fact-checker. Today is ${today}.
 You are given ONE claim from an automatically transcribed political broadcast or video (the transcript may contain mistakes; use the context to interpret names and numbers).
@@ -144,7 +225,8 @@ Reply with ONLY a JSON object, no other text:
 Use at most 3 sources, taken from your search.`;
 
 async function judge(body, env) {
-  if (!env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is not set on the worker');
+  if (!env.ANTHROPIC_API_KEY && env.GROQ_API_KEY) return groqJudge(body, env);   // free, more limited
+  if (!env.ANTHROPIC_API_KEY) throw new Error('No claim-research key is set on the worker (GROQ_API_KEY or ANTHROPIC_API_KEY)');
   const claim = String((body && body.claim) || '').slice(0, 600);
   if (claim.split(/\s+/).length < 4) throw new Error('Claim is too short');
   const context = String((body && body.context) || '').slice(0, 800);

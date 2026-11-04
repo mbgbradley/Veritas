@@ -72,7 +72,7 @@ V.checker = (() => {
 
   let judgeLeft = V.config.judge.maxPerSession;
   const resetBudget = () => { judgeLeft = V.config.judge.maxPerSession; };
-  const judgeOn = () => !!(V.settings.worker && V.info && V.info.anthropic);
+  const judgeOn = () => !!(V.settings.worker && V.info && (V.info.anthropic || V.info.judge));
 
   async function check(text, ctx) {
     const k = text.toLowerCase().replace(/\s+/g, ' ').trim();
@@ -111,7 +111,9 @@ V.checker = (() => {
         const sources = (j.sources || []).map(s => ({ url: s.url, label: s.title || host(s.url) }));
         if (j.verdict === 'TRUE' || j.verdict === 'MISLEADING' || j.verdict === 'FALSE') {
           return { verdict: j.verdict, sources,
-            detail: `<b>AI research</b> using web sources, not a published fact-check${j.confidence ? ' (confidence: ' + esc(j.confidence) + ')' : ''}. ${esc(j.explanation)}` };
+            detail: (j.engine === 'groq-wikipedia'
+              ? `<b>Limited AI check</b> using Wikipedia excerpts only, not a published fact-check and not a web search`
+              : `<b>AI research</b> using web sources, not a published fact-check`) + `${j.confidence ? ' (confidence: ' + esc(j.confidence) + ')' : ''}. ${esc(j.explanation)}` };
         }
         return { verdict: 'NOMATCH', sources, detail: `<b>Could not verify.</b> ${esc(j.explanation || 'Not enough reliable evidence found.')}` };
       }

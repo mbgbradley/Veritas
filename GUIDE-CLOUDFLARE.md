@@ -145,3 +145,36 @@ Limits to know about (check Groq's current limits page, free tiers change):
 - Groq's free tier was listed at about 20 requests a minute and 28,800 audio-seconds a day, shared by everyone using your site. Veritas keeps one request in flight and at least 4 seconds of audio per request, so one viewer uses about 12 requests a minute and real-time audio.
 - If you hit a limit, the status line says so and Veritas retries and keeps the audio instead of dropping it.
 - Audio is sent to Groq (or Cloudflare) for transcription. Read their data terms before making the site public. Set `ALLOWED_ORIGIN` (section 2) so only your site can use your worker.
+
+### If Test setup says "answered by workers-ai" (Groq is not active)
+- Open `https://YOUR-WORKER.workers.dev/` in a browser tab. It must show `"groq":true`. If it shows `"groq":false`, the worker does not see the key.
+- The secret name must be exactly `GROQ_API_KEY` (capital letters, underscores, no spaces), added to the same worker whose address is in Veritas settings.
+- After adding a secret or variable, click **Deploy** again. Then reload the address above.
+- Create the key at console.groq.com > API Keys. It starts with `gsk_`.
+- Once `"groq":true` shows, Test setup should say "answered by groq", and the transcript status line shows "(groq)".
+
+## 8. Free claim research with Groq (no new key needed)
+
+Groq retired its web-search models (Compound) on 21 Sept 2026, so Groq cannot browse the web. v8 instead fetches Wikipedia introductions for each claim and asks a Groq model to judge ONLY from those excerpts. It is limited: Wikipedia lags current events, so many claims will come back "Could not verify". That is intended; it never guesses from memory. Results are labelled "Limited AI check".
+
+1. Paste the new `worker/transcript-worker.js` into your Worker (Edit code) and **Deploy**. Your existing `GROQ_API_KEY` is reused.
+2. Open `https://YOUR-WORKER.workers.dev/`. You should see `"judge":"groq"`. (If `ANTHROPIC_API_KEY` is also set, it shows `"anthropic"` and the web-search research is used instead.)
+3. Upload the new `docs/` files to GitHub and reload with Ctrl + Shift + R. **Test setup** should say "Claim research runs on your Groq key".
+4. Try it: **Check text**, paste "The unemployment rate in the United States fell to 3.7 percent." and press Check. Expect a card labelled "Limited AI check" or "Could not verify".
+5. Optional: Worker variable (Text) `GROQ_JUDGE_MODEL` to choose another Groq model. Default tries `openai/gpt-oss-120b`, then `openai/gpt-oss-20b`.
+
+It shares your Groq free quota with transcription. Veritas caps research at 30 claims per session (`V.config.judge.maxPerSession`).
+
+## 9. TikTok, Instagram and Facebook links
+
+Paste a link in the "Check anything" box. Veritas shows the platform's own embed player and listens to the tab's audio (Chrome's share prompt appears once: choose **This tab** with audio on).
+
+- TikTok: short links (vm.tiktok.com) are resolved by the Worker, and the caption is read from TikTok's public oEmbed.
+- Instagram and Facebook: shown through their embed players. No login, token or download is used.
+- If a post will not play in the embed (private, age-restricted, embeds disabled, region-locked, or Facebook asking you to log in), open it in its own tab, play it, then press **Tab audio: free** and choose that tab.
+- These players cannot report the playback time, so the timestamps count from when transcription started.
+- Not supported on the free setup: downloading the video, Instagram Stories, private accounts.
+
+## 10. Trending strip
+
+The top of the page lists the 10 most-viewed videos in YouTube's News & Politics category from the last 3 days (political titles first). It uses your Google key (about 101 quota units per refresh, cached 30 minutes). The old outlet bar was removed; **+ Add outlet** is now next to Refresh above the schedule.

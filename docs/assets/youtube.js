@@ -12,6 +12,19 @@ V.yt = (() => {
     return j;
   }
 
+  // TikTok, Instagram and Facebook links. These are shown with each platform's own embed player.
+  function socialLink(raw) {
+    let m;
+    if (!/^https?:\/\//i.test(raw)) return null;
+    if (/(^|\.)tiktok\.com\//i.test(raw.replace(/^https?:\/\//i, '')) || /^https?:\/\/(vm|vt)\.tiktok\.com\//i.test(raw)) {
+      if ((m = raw.match(/tiktok\.com\/@[\w.-]+\/video\/(\d+)/i))) return { kind: 'social', platform: 'tiktok', id: m[1], url: raw.split('?')[0] };
+      return { kind: 'social', platform: 'tiktok', id: '', url: raw };       // short link: the service resolves it
+    }
+    if ((m = raw.match(/instagram\.com\/(?:[\w.]+\/)?(p|reel|reels|tv)\/([\w-]+)/i))) return { kind: 'social', platform: 'instagram', id: m[2], type: m[1] === 'reels' ? 'reel' : m[1], url: raw.split('?')[0] };
+    if (/(^https?:\/\/)?([\w-]+\.)?(facebook\.com|fb\.watch|fb\.com)\//i.test(raw)) return { kind: 'social', platform: 'facebook', url: raw };
+    return null;
+  }
+
   // Classify what the user pasted.
   function parseLink(raw) {
     raw = (raw || '').trim();
@@ -21,6 +34,7 @@ V.yt = (() => {
     if ((m = raw.match(/(?:youtu\.be\/|youtube\.com\/(?:live|embed)\/)([\w-]{11})/))) return { kind: 'video', id: m[1] };
     if ((m = raw.match(/youtube\.com\/watch\?[^#]*\bv=([\w-]{11})/))) return { kind: 'video', id: m[1] };
     if (/^[\w-]{11}$/.test(raw) && !/\s/.test(raw) && /[A-Z0-9_-]/.test(raw)) return { kind: 'video', id: raw };
+    const sp = socialLink(raw); if (sp) return sp;
     if (/^https?:\/\//i.test(raw)) return { kind: 'article', url: raw };
     return { kind: 'text', text: raw };
   }
@@ -38,7 +52,7 @@ V.yt = (() => {
   async function details(ids) {
     const out = {};
     for (let i = 0; i < ids.length; i += 50) {
-      const j = await api('/videos', { part: 'snippet,contentDetails,liveStreamingDetails', id: ids.slice(i, i + 50).join(',') });
+      const j = await api('/videos', { part: 'snippet,contentDetails,liveStreamingDetails,statistics', id: ids.slice(i, i + 50).join(',') });
       (j.items || []).forEach(v => {
         const s = v.snippet, l = v.liveStreamingDetails || {};
         out[v.id] = {
@@ -46,6 +60,7 @@ V.yt = (() => {
           publishedAt: s.publishedAt, duration: iso(v.contentDetails && v.contentDetails.duration),
           status: s.liveBroadcastContent || 'none',           // live | upcoming | none
           scheduledStart: l.scheduledStartTime || null, actualStart: l.actualStartTime || null, actualEnd: l.actualEndTime || null,
+          views: +((v.statistics || {}).viewCount) || 0,
           thumb: (s.thumbnails.medium || s.thumbnails.default || {}).url
         };
       });
@@ -89,6 +104,34 @@ V.yt = (() => {
     return items;
   }
 
+  // Top political videos of the last 3 days: YouTube's News & Politics category, most viewed first.
+  // One search (100 quota units) + one details call (1 unit), cached 30 minutes in this browser.
+  const lsGet = k => { try { const v = JSON.parse(localStorage.getItem(k)); return v && Date.now() - v.t < 1800000 ? v.d : null; } catch { return null; } };
+  const lsSet = (k, d) => { try { localStorage.setItem(k, JSON.stringify({ t: Date.now(), d })); } catch {} };
+  async function trending(force) {
+    const ck = 'veritas.trending';
+    if (!force) { const c = lsGet(ck); if (c) return c; }
+    const after = new Date(Date.now() - 3 * 86400000).toISOString();
+    const j = await api('/search', { part: 'snippet', type: 'video', videoCategoryId: '25', order: 'viewCount', publishedAfter: after, regionCode: 'US', relevanceLanguage: 'en', maxResults: 30 });
+    const ids = (j.items || []).map(i => i.id && i.id.videoId).filter(Boolean);
+    if (!ids.length) return [];
+    const det = await details(ids);
+    const all = ids.map(id => det[id]).filter(v => v && !(v.duration > 0 && v.duration <= 62 && v.status === 'none'));
+    const pol = V.config.politics;
+    // political titles first, then the rest of the category, each group by views
+    const rank = v => (pol.test(v.title) ? 0 : 1);
+    const items = all.sort((a, b) => rank(a) - rank(b) || b.views - a.views).slice(0, 10);
+    lsSet(ck, items);
+    return items;
+  }
+  async function social(url) {
+    if (!V.settings.worker) throw new Error('No transcript service set');
+    const r = await fetch(V.settings.worker.replace(/\/$/, '') + '/social?url=' + encodeURIComponent(url));
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || 'Social link lookup failed');
+    return j;
+  }
+
   // Captions and articles come from the optional transcript service (worker/).
   async function transcript(id) {
     if (!V.settings.worker) throw new Error('No transcript service set');
@@ -124,5 +167,5 @@ V.yt = (() => {
     return j;
   }
 
-  return { parseLink, one, details, feed, shorts, transcript, article, deepgramToken, judge };
+  return { parseLink, one, details, feed, shorts, trending, social, transcript, article, deepgramToken, judge };
 })();

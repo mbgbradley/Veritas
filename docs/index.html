@@ -29,14 +29,14 @@
 
 <form class="omni" id="omni" autocomplete="off">
   <label for="omniIn" class="omni-label">Check anything</label>
-  <input id="omniIn" type="text" placeholder="Paste a YouTube link (video, Short or live), an article link, or text that was sent to you">
+  <input id="omniIn" type="text" placeholder="Paste a YouTube, TikTok, Instagram or Facebook link, an article link, or text that was sent to you">
   <button class="btn primary" type="submit">Check</button>
 </form>
 
-<nav class="outlets" aria-label="Live news outlets">
-  <div class="outlet-scroll" id="outletList"></div>
-  <button class="btn add" id="btnAdd" type="button">+ Add outlet</button>
-</nav>
+<section class="trending" aria-label="Trending political videos">
+  <div class="trend-head"><span>Trending political videos</span><span class="sub">top 10 by views, last 3 days, YouTube</span><button class="btn ghost" id="btnTrend" type="button">Refresh</button></div>
+  <div class="trend-list" id="trendList"><p class="heads-msg">Add your Google API key in Setup &amp; settings (page footer) to load trending videos.</p></div>
+</section>
 
 <main class="theater">
   <section class="stage" id="stage" aria-label="Player">
@@ -44,6 +44,7 @@
       <iframe id="frame" title="Video player" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>
       <div class="article-box" id="articleBox" hidden></div>
       <div class="player-top"><span class="live" id="liveBadge">LIVE</span><span id="nowPlaying" class="now"></span><a id="openYT" class="open" target="_blank" rel="noopener">Open on YouTube ↗</a></div>
+      <div class="player-empty" id="playerEmpty">Pick a trending video above, choose one from the schedule below, or paste a link.</div>
       <div id="lower" class="lower" role="status" aria-live="polite" hidden></div>
     </div>
 
@@ -62,11 +63,6 @@
           <label class="who" id="whoWrap" hidden>Speaking:
             <select id="who"><option value="A">Speaker A</option><option value="B">Speaker B</option></select>
           </label>
-          <button class="btn primary" id="btnLocal" aria-pressed="false" title="Free: share any tab's audio and transcribe it. Uses free hosted Whisper through your transcript service when it is set up (a few seconds behind), otherwise a model on this device.">Tab audio: free</button>
-          <button class="btn" id="btnTab" aria-pressed="false" title="Faster and more accurate. Uses Deepgram through your transcript service.">Tab audio: cloud</button>
-          <button class="btn" id="btnMic" aria-pressed="false">Listen (mic)</button>
-          <button class="btn primary" id="btnDemo">Run demo</button>
-          <button class="btn ghost" id="btnClear">Clear</button>
         </div>
       </div>
       <div class="cap-body" id="capBody">
@@ -96,7 +92,7 @@
     <button role="tab" id="tabSched" aria-selected="true" data-tab="sched">TV schedule</button>
     <button role="tab" id="tabTop" aria-selected="false" data-tab="top">Top political stories</button>
     <button role="tab" id="tabShorts" aria-selected="false" data-tab="shorts">Shorts</button>
-    <button class="btn ghost refresh" id="btnRefresh">Refresh</button>
+    <button class="btn ghost refresh" id="btnRefresh">Refresh</button><button class="btn add" id="btnAdd" type="button">+ Add outlet</button>
   </div>
 
   <div class="panel" id="panelSched">
@@ -105,6 +101,13 @@
   </div>
   <div class="panel" id="panelTop" hidden><div class="topgrid" id="topGrid"><p class="heads-msg">Add your Google API key in Setup & settings (page footer) to load stories.</p></div></div>
   <div class="panel" id="panelShorts" hidden><div class="shorts" id="shortsGrid"><p class="heads-msg">Add your Google API key in Setup & settings (page footer) to load Shorts. You can also paste any Shorts link in the box at the top.</p></div></div>
+<div class="tools" id="tools" role="group" aria-label="Transcript tools"><span class="lbl">Transcript tools</span>
+  <button class="btn primary" id="btnLocal" aria-pressed="false" title="Free: share any tab's audio and transcribe it. Uses free hosted Whisper through your transcript service when it is set up (a few seconds behind), otherwise a model on this device.">Tab audio: free</button>
+  <button class="btn" id="btnTab" aria-pressed="false" title="Faster and more accurate. Uses Deepgram through your transcript service.">Tab audio: cloud</button>
+  <button class="btn" id="btnMic" aria-pressed="false">Listen (mic)</button>
+  <button class="btn primary" id="btnDemo">Run demo</button>
+  <button class="btn ghost" id="btnClear">Clear</button>
+</div>
 </section>
 
 <footer class="foot">Veritas is an independent project and is not affiliated with any broadcaster. Video is embedded from the original platform. <button type="button" class="linkbtn" id="btnSettings">Setup &amp; settings</button></footer>
