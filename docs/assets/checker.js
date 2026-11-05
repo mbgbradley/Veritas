@@ -60,9 +60,10 @@ V.checker = (() => {
   const bandScore = (verdict, n) => { const b = BAND[verdict]; return b && isFinite(n) ? Math.round(Math.min(b[1], Math.max(b[0], n))) : null; };
 
   const cache = new Map();
-  async function factCheckSearch(text) {
+  // site: optional publisher filter (Google's reviewPublisherSiteFilter), e.g. 'factcheck.org'.
+  async function factCheckSearch(text, site) {
     const q = text.length > 220 ? text.slice(0, 220) : text;
-    const r = await fetch(`https://factchecktools.googleapis.com/v1alpha1/claims:search?query=${encodeURIComponent(q)}&languageCode=en-US&pageSize=5&key=${encodeURIComponent(V.settings.key)}`);
+    const r = await fetch(`https://factchecktools.googleapis.com/v1alpha1/claims:search?query=${encodeURIComponent(q)}&languageCode=en-US&pageSize=${site ? 5 : 8}${site ? '&reviewPublisherSiteFilter=' + encodeURIComponent(site) : ''}&key=${encodeURIComponent(V.settings.key)}`);
     const j = await r.json();
     if (!r.ok) throw new Error(j.error && j.error.message || 'Fact-check lookup failed');
     const hits = [];
@@ -95,7 +96,14 @@ V.checker = (() => {
     const p = (async () => {
       // Tier 1: published fact-checks
       if (V.settings.key) {
-        const hits = (await factCheckSearch(text)).filter(h => h.sim >= 0.5 && h.url);
+        // FactCheck.org is asked on its own (so its reviews are not crowded out), at the same time as every other publisher.
+        const first = V.config.checkers[0] && V.config.checkers[0].host;
+        const [pri, all] = await Promise.all([
+          first ? factCheckSearch(text, first).catch(() => []) : Promise.resolve([]),
+          factCheckSearch(text)
+        ]);
+        const seenUrl = new Set();
+        const hits = [...pri, ...all].filter(h => h.sim >= 0.5 && h.url && !seenUrl.has(h.url) && seenUrl.add(h.url));
         if (hits.length) {
           const rank = h => { const i = matchHost(host(h.url), V.config.checkers); return i < 0 ? 99 : i; };
           hits.sort((a, b) => rank(a) - rank(b) || b.sim - a.sim);

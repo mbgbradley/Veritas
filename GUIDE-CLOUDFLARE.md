@@ -39,7 +39,7 @@ Cloudflare's and Google's screens change from time to time. If a button is named
 
 ### 2b. Captions provider (recommended; this is what makes captions work)
 
-YouTube commonly blocks requests that come from Cloudflare's servers, so reading captions directly often fails. A hosted transcript provider does that part for you.
+YouTube commonly blocks requests t come from Cloudflare's servers, so reading captions directly often fails. A hosted transcript provider does that part for you.
 
 1. Go to **supadata.ai** and sign up. Their free plan lists 100 credits a month and no credit card; check the current terms on their pricing page.
 2. Copy your API key from the dashboard.
@@ -178,3 +178,41 @@ Paste a link in the "Check anything" box. Veritas shows the platform's own embed
 ## 10. Trending strip
 
 The top of the page lists the 10 most-viewed videos in YouTube's News & Politics category from the last 3 days (political titles first). It uses your Google key (about 101 quota units per refresh, cached 30 minutes). The old outlet bar was removed; **+ Add outlet** is now next to Refresh above the schedule.
+
+## 11. v9: Gemini as the claim checker (free key), and how the truth % works
+
+**Which checker runs.** The Worker uses the first of these that has a key: `ANTHROPIC_API_KEY` (web search, paid), `GEMINI_API_KEY` (free key), `GROQ_API_KEY` (Wikipedia only). The worker address shows which one in `"judge"`.
+
+**Add Gemini (free):**
+1. Go to **aistudio.google.com**, sign in, click **Get API key > Create API key**, and copy it.
+2. Cloudflare > your worker > **Settings > Variables and Secrets > Add**: Type **Secret**, name `GEMINI_API_KEY`, paste it, **Deploy**. Paste the new `worker/transcript-worker.js` first.
+3. Open your worker address. You should see `"judge":"gemini"`. **Test setup** in Veritas should say "Claim research runs on your Gemini key".
+
+What to expect (free tiers change; check Google's current limits): the Worker first asks for a Google-Search-grounded answer (`gemini-2.5-flash`). Newer free keys are often not allowed to do that, so it falls back to a knowledge-only answer from `gemini-3.5-flash-lite`, labelled "Limited AI check ... no live web search". Free limits were measured at roughly 20 requests a day on the larger models and 500 a day on flash-lite. Optional Text variables: `GEMINI_MODEL`, `GEMINI_GROUNDED_MODEL` (set to `off` to skip grounding). Free-tier data may be used by Google to improve its products; do not send anything private.
+
+**Ask Gemini button.** Cards that say "No match" now have **Ask Gemini**. It copies a ready-made prompt and opens Gemini, which has web search built in. This is the free, manual way to get a properly sourced answer for the claims that matter most in a demo.
+
+**How the truth % is calculated**
+- Published fact-check (Google Fact Check Tools): the rating is converted to a score: Pants on fire 2, False 5, Mostly false 20, Misleading 45, Half true 50, Mostly true 85, True 95. If checkers disagree, the scores are averaged.
+- AI check: the model proposes a score, which is forced into the band of its verdict (True 75 to 98, Misleading 35 to 74, False 2 to 34) and rounded to 5, so colour, label and % always agree. AI scores show with "≈". Low-confidence answers get no verdict and no score.
+- Card colours: green True, orange Misleading, red False. Grey (no %) means not verified.
+- **Meter** = weighted average of the claim scores. Weight = evidence strength (published fact-check 1.0, AI high confidence 0.8, medium 0.5) x check-worthiness (claims with numbers and specifics count up to 2x). Unverified claims are left out and not counted as true or false. With fewer than 3 rated claims it says "early reading". Debate mode gives each speaker their own meter.
+- Why not use the AI's own percentage directly? Models are not calibrated: "95 to 98%" sounds precise, but it is a guess. Clamping to verdict bands and weighting by evidence keeps the number honest.
+
+## 12. v9: Instagram and TikTok
+
+Veritas now uses each platform's official embed script (the same markup their "Embed" button gives you) instead of a guessed player link. Facebook is unchanged.
+
+If a post still will not play in the page, a bar under the player stays visible: **Open post** (new tab), press play there, come back, click **Start transcription**, choose that tab, and tick "Also share tab audio". This works for any site, including posts that block embedding.
+
+## 13. v9: trending list is English only
+
+The trending strip keeps only videos whose YouTube language is English. If the uploader left the language blank, Veritas checks that the title and description look like English. A few English videos with no language tag and unusual titles may be skipped.
+
+## 14. v10: FactCheck.org first, complete sentences, default tab
+
+**FactCheck.org first.** For every claim Veritas asks Google's Fact Check Tools API two questions at the same time: one limited to FactCheck.org (the API's `reviewPublisherSiteFilter`) and one across all publishers. FactCheck.org reviews are ranked first, so they are not crowded out. It uses the same Google key you already have; nothing new to set up. The AI checkers are also told to look at FactCheck.org first. FactCheck.org's own website search is a Google search box with no API, so Veritas does not scrape it. Instead, cards that say "No match" now have a **Search FactCheck.org** link that opens their search page with the claim filled in.
+
+**Complete sentences.** Speech arrives in 4 to 8 second pieces. Words after the last sentence end are now held back (shown greyed) and joined to the next piece, fragments under 5 words are joined to the next sentence, and a held-back tail is released after 7 seconds of silence, at 45 words, or when you stop. Each transcript line, and each claim sent for checking, is now a full statement. The cost is that a claim is checked a few seconds after its sentence finishes.
+
+**Default tab.** Top political stories is now first and shown by default. Shorts is next, and TV schedule is last.

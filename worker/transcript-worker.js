@@ -158,7 +158,7 @@ function finalizeJudgment(out, engine, maxConfidence) {
    knowledge-only answer, which is labelled as such and never counted with high confidence. */
 const GEMINI_PROMPT = (today, grounded) => `You are a careful, neutral fact-checker. Today is ${today}.
 You get ONE claim from an automatically transcribed political broadcast (names and numbers may be misheard).
-${grounded ? 'Use Google Search. Prefer primary and official sources (government data, court records, official statements), then established fact-checkers (AP, Reuters, PolitiFact, FactCheck.org, Snopes, Full Fact), then reputable news. Watch the time period and the exact wording.'
+${grounded ? 'Use Google Search. Prefer primary and official sources (government data, court records, official statements), then established fact-checkers (FactCheck.org first, then AP, Reuters, PolitiFact, Snopes, Full Fact), then reputable news. Watch the time period and the exact wording.'
   : 'You cannot search the web. Judge only from stable facts you are sure about. For recent events, latest figures, or anything you are unsure of, answer UNVERIFIABLE.'}
 Opinions, predictions and rhetoric are NOT checkable: answer UNVERIFIABLE.
 TRUE = accurate. MISLEADING = partly true, missing important context, or framed to give a wrong impression. FALSE = contradicted by reliable evidence. Prefer UNVERIFIABLE over a weak FALSE.
@@ -287,7 +287,7 @@ const JUDGE_PROMPT = (today) => `You are a careful, neutral fact-checker. Today 
 You are given ONE claim from an automatically transcribed political broadcast or video (the transcript may contain mistakes; use the context to interpret names and numbers).
 
 1. Decide whether it is a checkable factual claim (statistics, records, dates, official actions, quotes, public facts, science). Opinions, predictions, rhetoric and vague statements are NOT checkable: answer UNVERIFIABLE and say so.
-2. If checkable, search the web. Prefer primary and official sources (government data, court records, official statements) and established fact-checkers (PolitiFact, FactCheck.org, Snopes, AP, Reuters, Full Fact), then reputable news organizations. Judge only on the evidence you found, and watch the time period and the exact wording of the claim.
+2. If checkable, search the web. Prefer primary and official sources (government data, court records, official statements) and established fact-checkers (FactCheck.org first, then PolitiFact, Snopes, AP, Reuters, Full Fact), then reputable news organizations. Judge only on the evidence you found, and watch the time period and the exact wording of the claim.
 3. Verdicts: TRUE = accurate; MISLEADING = partly true, missing important context, or framed in a way that gives a wrong impression; FALSE = contradicted by reliable evidence; UNVERIFIABLE = not enough reliable evidence, or not checkable. Prefer UNVERIFIABLE over a weak FALSE.
 
 Reply with ONLY a JSON object, no other text:

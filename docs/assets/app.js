@@ -12,7 +12,7 @@
     cards: [], lines: [], seen: new Set(), flags: null, docCount: 0,
     t0: null, rec: null, pollTimer: null, timers: [], activeLine: -1, lastSegEnd: -1, openSeq: 0, lastT: 0,
     names: { A: 'Speaker A', B: 'Speaker B' },
-    feed: null, shorts: null, tab: 'sched', sched: { status: 'all', outlet: 'all' }
+    feed: null, shorts: null, tab: 'top', sched: { status: 'all', outlet: 'all' }
   };
   const MAX_CLAIMS = 60;
   let cardSeq = 0, player = null, ytReady = false, pendingAttach = false, interimEl = null;
@@ -28,7 +28,7 @@
   };
   const LABEL = { TRUE: 'TRUE', MISLEADING: 'MISLEADING', FALSE: 'FALSE', NOMATCH: 'NO MATCH', REPORTED: 'RELATED REPORTING', PENDING: 'CHECKING' };
   const COLOR = { TRUE: 'var(--true)', MISLEADING: 'var(--mis)', FALSE: 'var(--false)', NOMATCH: 'var(--none)', REPORTED: 'var(--silver)' };
-  const EMPTY = '<p class="empty">Pick a program below, paste a link above, or press <b>Run demo</b> to see sample checks.</p>';
+  const EMPTY = '<p class="empty">Pick a story below, paste a link above, or press <b>Run demo</b> to see sample checks.</p>';
 
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const fmt = sec => {
@@ -108,7 +108,7 @@
   /* ================= SESSION RESET ================= */
   const Q = { items: [], active: 0, max: 3, gen: 0 };
   function reset() {
-    stopTab(); stopLocal();
+    stopTab(); stopLocal(false);
     clearInterval(state.pollTimer); state.pollTimer = null;
     if (state.rec) { try { state.rec.stop(); } catch {} }
     Q.items.length = 0; Q.gen++;
@@ -466,10 +466,10 @@
       const sc = c.verdict in DEFAULT_SCORE ? cardScore(c) : null;
       const pct = sc != null ? `<span class="pct" title="${c.ai ? 'Estimated by AI' : 'From the published rating'}">${c.ai ? '≈ ' : ''}${sc}% true</span>` : '';
       const bar = sc != null ? `<div class="sbar" role="img" aria-label="${sc} percent true"><i style="width:${sc}%"></i></div>` : '';
-      const ask = c.verdict === 'NOMATCH' ? '<button type="button" class="askg" title="Copies a ready-made prompt and opens Gemini">Ask Gemini ↗</button>' : '';
+      const ask = c.verdict === 'NOMATCH' ? `<div class="acts"><a class="askg" target="_blank" rel="noopener" href="https://www.factcheck.org/search/#gsc.tab=0&gsc.q=${encodeURIComponent(c.text.slice(0, 120))}">Search FactCheck.org ↗</a><button type="button" class="askg" title="Copies a ready-made prompt and opens Gemini">Ask Gemini ↗</button></div>` : '';
       el.innerHTML = `<div class="vh">${ICON[c.verdict]}<span>${LABEL[c.verdict]}${sp}</span>${pct}${when ? `<button type="button" class="t">${when}</button>` : ''}</div>
         <div class="q">“${esc(c.text)}”</div>${bar}${tags}${c.detail ? `<div class="d">${c.detail}</div>` : ''}${srcs}${ask}`;
-      const ag = el.querySelector('.askg'); if (ag) ag.addEventListener('click', () => askGemini(c));
+      const ag = el.querySelector('button.askg'); if (ag) ag.addEventListener('click', () => askGemini(c));
       const tb = el.querySelector('.t'); if (tb) tb.addEventListener('click', () => focusCard(c));
       box.appendChild(el);
     });
@@ -837,6 +837,52 @@
     });
     return lwReady;
   }
+  /* Complete thoughts: speech arrives in 4-8 second pieces that rarely end where a sentence ends. Words after the last
+     sentence end are held back (and shown greyed) and joined to the next piece; fragments under 5 words are joined to the
+     next sentence; a held-back tail is released after 7 s of silence, at 45 words, or when capture stops. */
+  const SENT_END = /[.!?…]["'”’)\]]*$/;
+  const wc = t => (t.match(/\S+/g) || []).length;
+  function clearInterim() { if (interimEl) { interimEl.remove(); interimEl = null; } }
+  function showInterim(text) {
+    document.querySelectorAll('#capBody .empty').forEach(e => e.remove());
+    if (!interimEl) { interimEl = document.createElement('p'); interimEl.className = 'line interim'; interimEl.innerHTML = '<span class="sp">…</span><span class="tx"></span>'; placeLine(interimEl); }
+    interimEl.querySelector('.tx').textContent = text; scrollLatest();
+  }
+  function assemble(tail, tailT, text, t0, secs) {
+    const tailWords = tail ? wc(tail) : 0, newWords = Math.max(1, wc(text));
+    const parts = splitSentences((tail ? tail + ' ' : '') + text);
+    let seen = 0;
+    const timed = parts.map(p => { const at = seen; seen += wc(p); return { text: p, t: at < tailWords ? tailT : t0 + Math.max(0, (at - tailWords) / newWords) * secs }; });
+    let rest = null;
+    if (timed.length && !SENT_END.test(timed[timed.length - 1].text)) rest = timed.pop();       // unfinished: hold back
+    const out = []; let acc = null;
+    timed.forEach(p => {
+      acc = acc ? { t: acc.t, text: acc.text + ' ' + p.text } : { ...p };
+      if (wc(acc.text) >= 5) { out.push(acc); acc = null; }
+    });
+    if (acc) {
+      if (rest) rest = { t: acc.t, text: acc.text + ' ' + rest.text };
+      else if (out.length) out[out.length - 1].text += ' ' + acc.text;
+      else out.push(acc);
+    }
+    if (rest && wc(rest.text) >= 45) { out.push(rest); rest = null; }                              // a run-on: do not hold it forever
+    return { out, rest };
+  }
+  function feedSpeech(L, text, t0, secs) {
+    const r = assemble(L.tail, L.tailT, text, t0, secs);
+    clearInterim();
+    r.out.forEach(p => ingestLive(p.text, 'A', p.t));
+    L.tail = r.rest ? r.rest.text : ''; L.tailT = r.rest ? r.rest.t : null;
+    clearTimeout(L.tailTimer);
+    if (L.tail) { showInterim(L.tail); L.tailTimer = setTimeout(() => flushTail(L), 7000); }
+  }
+  function flushTail(L) {
+    clearTimeout(L.tailTimer);
+    if (!L.tail) return;
+    const text = L.tail, t = L.tailT; L.tail = ''; L.tailT = null;
+    clearInterim(); ingestLive(text, 'A', t);
+  }
+  V.assemble = assemble;
   const HALLUCINATION = /^\s*(\[[^\]]*\]|\([^)]*\)|thank you\.?|thanks for watching\.?|thanks\.?|you\.?|bye\.?|\.+)\s*$/i;
   function onLocalResult(m) {
     const L = local; if (!L) return;
@@ -848,10 +894,7 @@
       lag = (performance.now() - rec.heard) / 1000;
     }
     const text = (m.text || '').replace(/\s+/g, ' ').trim();
-    if (rec && text && !HALLUCINATION.test(text)) {
-      const sents = splitSentences(text), span = Math.max(1, rec.secs), each = span / sents.length;
-      sents.forEach((s, i) => ingestLive(s, 'A', rec.t + i * each));
-    }
+    if (rec && text && !HALLUCINATION.test(text)) feedSpeech(L, text, rec.t, Math.max(1, rec.secs));
     if (m.via) L.via = m.via;
     if (L.remote) setStatus(`free cloud Whisper${L.via ? ' (' + L.via + ')' : ''} · about ${Math.round(lag)}s behind${L.via === 'workers-ai' ? ' · slower backup engine, add GROQ_API_KEY' : ''}`);
     else setStatus(`free mode · about ${Math.round(lag)}s behind${lwDevice === 'wasm' ? ' (CPU)' : ''}${L.avg > V.config.local.maxSec ? ' · this device is slow, try cloud mode' : ''}`);
@@ -885,9 +928,11 @@
     L.fails = 0;
     onLocalResult({ id, text, via: via });
   }
-  function stopLocal() {
+  function stopLocal(flush = true) {
     if (!local) return;
     const L = local; local = null;
+    if (flush) flushTail(L); else clearTimeout(L.tailTimer);
+    clearInterim();
     try { L.proc.disconnect(); L.ctx.close(); } catch {}
     try { L.stream.getTracks().forEach(x => x.stop()); } catch {}
     const btn = $('#btnLocal'); btn.textContent = LOCAL_LABEL; btn.setAttribute('aria-pressed', 'false'); btn.disabled = false;
@@ -910,7 +955,7 @@
     const src = ctx.createMediaStreamSource(new MediaStream(at));
     const proc = ctx.createScriptProcessor(BLOCK, 1, 1);
     const mute = ctx.createGain(); mute.gain.value = 0;
-    const L = local = { stream, ctx, proc, blocks: [], ready: false, busy: true, avg: 0, seq: 0, pend: null, remote, fails: 0, holdUntil: 0, lost: 0 };
+    const L = local = { stream, ctx, proc, blocks: [], ready: false, busy: true, avg: 0, seq: 0, pend: null, remote, fails: 0, holdUntil: 0, lost: 0, tail: '', tailT: null, tailTimer: 0 };
     const btn = $('#btnLocal'); btn.textContent = 'Stop free capture'; btn.setAttribute('aria-pressed', 'true');
 
     const send = cut => {

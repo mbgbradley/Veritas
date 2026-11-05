@@ -45,7 +45,7 @@
       <div class="article-box" id="articleBox" hidden></div>
       <div class="embed-box" id="embedBox" hidden></div>
       <div class="player-top"><span class="live" id="liveBadge">LIVE</span><span id="nowPlaying" class="now"></span><a id="openYT" class="open" target="_blank" rel="noopener">Open on YouTube ↗</a></div>
-      <div class="player-empty" id="playerEmpty">Pick a trending video above, choose one from the schedule below, or paste a link.</div>
+      <div class="player-empty" id="playerEmpty">Pick a trending video above, choose one of the top political stories below, or paste a link.</div>
       <div id="lower" class="lower" role="status" aria-live="polite" hidden></div>
     </div>
 
@@ -91,17 +91,17 @@
 
 <section class="browse" aria-label="Programs and Shorts">
   <div class="tabs" role="tablist">
-    <button role="tab" id="tabSched" aria-selected="true" data-tab="sched">TV schedule</button>
-    <button role="tab" id="tabTop" aria-selected="false" data-tab="top">Top political stories</button>
+    <button role="tab" id="tabTop" aria-selected="true" data-tab="top">Top political stories</button>
     <button role="tab" id="tabShorts" aria-selected="false" data-tab="shorts">Shorts</button>
+    <button role="tab" id="tabSched" aria-selected="false" data-tab="sched">TV schedule</button>
     <button class="btn ghost refresh" id="btnRefresh">Refresh</button><button class="btn add" id="btnAdd" type="button">+ Add outlet</button>
   </div>
 
-  <div class="panel" id="panelSched">
+  <div class="panel" id="panelSched" hidden>
     <div class="filters" id="schedFilters"></div>
     <div class="sched" id="schedList"><p class="heads-msg">Add your Google API key in Setup & settings (page footer) to load live and recent programs.</p></div>
   </div>
-  <div class="panel" id="panelTop" hidden><div class="topgrid" id="topGrid"><p class="heads-msg">Add your Google API key in Setup & settings (page footer) to load stories.</p></div></div>
+  <div class="panel" id="panelTop"><div class="topgrid" id="topGrid"><p class="heads-msg">Add your Google API key in Setup & settings (page footer) to load stories.</p></div></div>
   <div class="panel" id="panelShorts" hidden><div class="shorts" id="shortsGrid"><p class="heads-msg">Add your Google API key in Setup & settings (page footer) to load Shorts. You can also paste any Shorts link in the box at the top.</p></div></div>
 <div class="tools" id="tools" role="group" aria-label="Transcript tools"><span class="lbl">Transcript tools</span>
   <button class="btn primary" id="btnLocal" aria-pressed="false" title="Free: share any tab's audio and transcribe it. Uses free hosted Whisper through your transcript service when it is set up (a few seconds behind), otherwise a model on this device.">Tab audio: free</button>

@@ -63,3 +63,11 @@ The worker has a new `POST /transcribe` route (Groq Whisper large-v3-turbo, with
 
 ## v8
 Groq+Wikipedia claim judge (worker), TikTok/Instagram/Facebook links, trending top-10 strip replacing the outlet bar, green for True, tighter transcript lines, transcript buttons moved below the schedule. See GUIDE-CLOUDFLARE.md sections 8 to 10.
+
+
+## v9
+English-only trending; TikTok/Instagram via official embed.js with an open-in-tab helper; Gemini claim checker (free key); per-claim truth % with red/orange/green cards; weighted meter; Ask Gemini button. See GUIDE sections 11 to 13.
+
+
+## v10
+FactCheck.org-first lookup (reviewPublisherSiteFilter), complete-sentence assembly, Top political stories as default tab. See GUIDE section 14.

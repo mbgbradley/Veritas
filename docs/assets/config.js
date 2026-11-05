@@ -20,9 +20,9 @@ V.config = {
 
   // Tier 1: established fact-checkers. Order = priority when results disagree.
   checkers: [
+    { host: "factcheck.org", name: "FactCheck.org" },      // searched first, on its own, for every claim
     { host: "politifact.com", name: "PolitiFact" },
     { host: "snopes.com", name: "Snopes" },
-    { host: "factcheck.org", name: "FactCheck.org" },
     { host: "apnews.com", name: "AP Fact Check" },
     { host: "reuters.com", name: "Reuters Fact Check" },
     { host: "fullfact.org", name: "Full Fact" }

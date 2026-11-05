@@ -268,3 +268,6 @@ dialog textarea{width:100%;resize:vertical}
 /* embedded TikTok / Instagram posts */
 .embed-box{position:absolute;inset:0;overflow:auto;display:flex;justify-content:center;align-items:flex-start;background:#0a0e14;padding:36px 8px 8px}
 .embed-box[hidden]{display:none}
+
+.card .acts{display:flex;gap:6px;flex-wrap:wrap}
+.card a.askg{text-decoration:none;display:inline-block}
