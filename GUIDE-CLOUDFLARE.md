@@ -39,7 +39,7 @@ Cloudflare's and Google's screens change from time to time. If a button is named
 
 ### 2b. Captions provider (recommended; this is what makes captions work)
 
-YouTube commonly blocks requests t come from Cloudflare's servers, so reading captions directly often fails. A hosted transcript provider does that part for you.
+YouTube commonly blocks requests that come from Cloudflare's servers, so reading captions directly often fails. A hosted transcript provider does that part for you.
 
 1. Go to **supadata.ai** and sign up. Their free plan lists 100 credits a month and no credit card; check the current terms on their pricing page.
 2. Copy your API key from the dashboard.
@@ -216,3 +216,22 @@ The trending strip keeps only videos whose YouTube language is English. If the u
 **Complete sentences.** Speech arrives in 4 to 8 second pieces. Words after the last sentence end are now held back (shown greyed) and joined to the next piece, fragments under 5 words are joined to the next sentence, and a held-back tail is released after 7 seconds of silence, at 45 words, or when you stop. Each transcript line, and each claim sent for checking, is now a full statement. The cost is that a claim is checked a few seconds after its sentence finishes.
 
 **Default tab.** Top political stories is now first and shown by default. Shorts is next, and TV schedule is last.
+
+## 15. What's new in v11 (better transcripts, context-aware checks, search buttons)
+
+**Redeploy the Worker.** Cloudflare dashboard → Workers & Pages → veritas-service → Edit code → paste the new `worker/transcript-worker.js` → Deploy. Then upload the new `docs/` folder to GitHub (replace the old files).
+
+**Best-quality transcription (free): Deepgram Nova-3**
+1. Sign up at deepgram.com (no card). You get a free credit (about $200, roughly 400+ hours). Check the expiry on your Deepgram dashboard.
+2. Create an API key (Settings → API Keys, "Member" role is enough).
+3. In Cloudflare: your Worker → Settings → Variables and Secrets → Add → type *Secret*, name `DEEPGRAM_API_KEY`, paste the key → Deploy.
+4. Open `/` on your Worker URL: it should now show `"deepgram":true`.
+5. In Veritas → Setup & settings → **Transcription engine**: *Automatic* uses Deepgram when the key exists, otherwise Groq Whisper. You can force either one.
+
+Whisper (Groq) is now tuned too: longer chunks (6–14 s), cuts at the quietest moment, and it is told the video title and the last lines so names and sentences continue cleanly. Optional: add variable `GROQ_WHISPER_MODEL` = `whisper-large-v3` (slower, a bit more accurate).
+
+**Context-aware fact-checking.** Each claim is judged with the video title, the 3 statements before it and 2 after it. Claims such as "They did that last year" are rewritten as a standalone statement ("Checked in context as: …"), and the earlier sentence is used to find published fact-checks.
+
+**Search this statement.** Every card has a "Search this statement" drop-down: FactCheck.org, Perplexity and Gemini. Perplexity opens with the question pre-filled. Gemini cannot be pre-filled, so the prompt is copied and Gemini opens; paste it.
+
+**Tab audio prompt.** Chrome always asks the viewer to pick the tab, and a website cannot answer it. v11 pre-selects "This tab", turns off the extra options and ticks "Also share tab audio" where Chrome allows. Removing the prompt completely needs a small Chrome extension.

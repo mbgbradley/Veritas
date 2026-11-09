@@ -271,3 +271,9 @@ dialog textarea{width:100%;resize:vertical}
 
 .card .acts{display:flex;gap:6px;flex-wrap:wrap}
 .card a.askg{text-decoration:none;display:inline-block}
+
+.card details.more{margin-top:2px}
+.card details.more summary{cursor:pointer;font-size:12px;color:var(--muted);list-style:none}
+.card details.more summary::before{content:"▸ "}
+.card details.more[open] summary::before{content:"▾ "}
+.card details.more .acts{margin-top:6px}

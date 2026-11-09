@@ -12,6 +12,7 @@
 //
 // Settings (Worker > Settings > Variables and Secrets):
 //   GROQ_API_KEY      (Secret)  free Whisper large-v3-turbo from console.groq.com (no card needed)
+//   GROQ_WHISPER_MODEL (Text)   optional: whisper-large-v3 (more accurate, slower) instead of the default whisper-large-v3-turbo
 //   AI                (Binding) optional backup: Settings > Bindings > Add > Workers AI, variable name AI
 //   SUPADATA_API_KEY  (Secret)  recommended: a hosted transcript provider. YouTube often blocks Cloudflare's
 //                               servers, so reading captions directly can fail; this route avoids that.
@@ -79,6 +80,7 @@ async function deepgramToken(env) {
 /* ---------- Speech to text: free hosted Whisper (Groq, then Cloudflare Workers AI) ---------- */
 const MAX_AUDIO_BYTES = 2 * 1024 * 1024;   // a 12 s, 16 kHz, 16-bit mono chunk is about 380 KB
 
+function normTxt(t) { return String(t || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim(); }
 async function transcribe(req, url, env) {
   if (!env.GROQ_API_KEY && !(env.AI && env.AI.run)) {
     throw httpError(501, 'No speech service is set up. Add GROQ_API_KEY (or a Workers AI binding named AI) to the worker');
@@ -87,12 +89,15 @@ async function transcribe(req, url, env) {
   if (buf.byteLength < 1000) throw httpError(400, 'Audio chunk is empty');
   if (buf.byteLength > MAX_AUDIO_BYTES) throw httpError(413, 'Audio chunk is too large');
   const lang = /^[a-z]{2}$/.test(url.searchParams.get('lang') || '') ? url.searchParams.get('lang') : 'en';
+  // Context for Whisper: the video title and the words just before this chunk. It keeps names, spelling and sentences consistent.
+  const prompt = (url.searchParams.get('p') || '').replace(/\s+/g, ' ').trim().slice(-400);
+  const finish = r => { const n = normTxt(r.text), pn = normTxt(prompt); if (pn && n.length >= 15 && pn.includes(n)) r.text = ''; return r; };   // Whisper sometimes just repeats the prompt over silence
   const errors = [];
   if (env.GROQ_API_KEY) {
-    try { return { ...(await viaGroq(buf, lang, env.GROQ_API_KEY)), via: 'groq' }; }
+    try { return { ...finish(await viaGroq(buf, lang, env.GROQ_API_KEY, prompt, env.GROQ_WHISPER_MODEL)), via: 'groq' }; }
     catch (e) { errors.push('groq: ' + (e.message || e)); if (!(env.AI && env.AI.run)) throw httpError(e.status || 502, errors.join('; '), e.retryAfter); }
   }
-  try { return { ...(await viaWorkersAi(buf, lang, env.AI)), via: 'workers-ai', fallback: errors.length ? errors[0] : '' }; }
+  try { return { ...finish(await viaWorkersAi(buf, lang, env.AI, prompt)), via: 'workers-ai', fallback: errors.length ? errors[0] : '' }; }
   catch (e) { errors.push('workers-ai: ' + (e.message || e)); throw httpError(e.status || 502, errors.join('; ')); }
 }
 
@@ -105,10 +110,11 @@ function keepSegment(s) {
   return true;
 }
 
-async function viaGroq(buf, lang, key) {
+async function viaGroq(buf, lang, key, prompt, model) {
   const fd = new FormData();
   fd.append('file', new Blob([buf], { type: 'audio/wav' }), 'chunk.wav');
-  fd.append('model', 'whisper-large-v3-turbo');
+  fd.append('model', model || 'whisper-large-v3-turbo');
+  if (prompt) fd.append('prompt', prompt);
   fd.append('response_format', 'verbose_json');
   fd.append('temperature', '0');
   fd.append('language', lang);
@@ -125,10 +131,10 @@ async function viaGroq(buf, lang, key) {
   return { text: text.replace(/\s+/g, ' ').trim() };
 }
 
-async function viaWorkersAi(buf, lang, ai) {
+async function viaWorkersAi(buf, lang, ai, prompt) {
   const bytes = new Uint8Array(buf);
   let bin = ''; for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
-  const out = await ai.run('@cf/openai/whisper-large-v3-turbo', { audio: btoa(bin), language: lang, task: 'transcribe' });
+  const out = await ai.run('@cf/openai/whisper-large-v3-turbo', { audio: btoa(bin), language: lang, task: 'transcribe', ...(prompt ? { initial_prompt: prompt } : {}) });
   const segs = out && Array.isArray(out.segments) ? out.segments : null;
   const text = segs ? segs.filter(keepSegment).map(s => s.text).join(' ') : ((out && out.text) || '');
   return { text: text.replace(/\s+/g, ' ').trim() };
@@ -150,7 +156,7 @@ function finalizeJudgment(out, engine, maxConfidence) {
   if (maxConfidence === 'medium' && confidence === 'high') confidence = 'medium';
   let explanation = String(out.explanation || '').slice(0, 500);
   if (verdict !== 'UNVERIFIABLE' && confidence === 'low') { explanation = 'Low confidence, so no verdict. ' + explanation; verdict = 'UNVERIFIABLE'; }
-  return { verdict, confidence, explanation, score: scoreFor(verdict, out.score), engine };
+  return { verdict, confidence, explanation, score: scoreFor(verdict, out.score), standalone: String(out.standalone || '').replace(/\s+/g, ' ').slice(0, 300), engine };
 }
 
 /* ---------- Gemini (free key from aistudio.google.com) ----------
@@ -164,12 +170,14 @@ Opinions, predictions and rhetoric are NOT checkable: answer UNVERIFIABLE.
 TRUE = accurate. MISLEADING = partly true, missing important context, or framed to give a wrong impression. FALSE = contradicted by reliable evidence. Prefer UNVERIFIABLE over a weak FALSE.
 "score" is how accurate the claim is, 0 to 100 (100 = fully accurate), and must agree with the verdict: TRUE 75-98, MISLEADING 35-74, FALSE 2-34.
 Reply with ONLY a JSON object, no other text:
-{"verdict":"TRUE|MISLEADING|FALSE|UNVERIFIABLE","confidence":"high|medium|low","score":0,"explanation":"one or two plain sentences naming the key figure or source"}`;
+{"verdict":"TRUE|MISLEADING|FALSE|UNVERIFIABLE","confidence":"high|medium|low","score":0,"standalone":"","explanation":"one or two plain sentences naming the key figure or source"}
+CONTEXT: you also get the video title and the statements spoken just BEFORE and AFTER the claim. Use them to work out who "they", "he", "it" or "that" refers to, which time period and place are meant, and what the speaker actually means. Judge the claim as the speaker meant it in context, not as an isolated string. If the context shows it is a question, a joke, a hypothetical, or the speaker quoting or describing someone else's claim, answer UNVERIFIABLE and say why.
+"standalone" is the claim rewritten so it makes sense on its own (names instead of pronouns, the time period filled in), in at most 40 words. Do not add facts the speaker did not say.`;
 
 async function geminiJudge(body, env) {
   const claim = String((body && body.claim) || '').slice(0, 600);
   if (claim.split(/\s+/).length < 4) throw new Error('Claim is too short');
-  const context = String((body && body.context) || '').slice(0, 800);
+  const context = String((body && body.context) || '').slice(0, 1400);
   const today = /^\d{4}-\d{2}-\d{2}$/.test((body && body.today) || '') ? body.today : new Date().toISOString().slice(0, 10);
   const plan = [];
   if (env.GEMINI_GROUNDED_MODEL !== 'off') plan.push({ model: env.GEMINI_GROUNDED_MODEL || 'gemini-2.5-flash', search: true });
@@ -180,7 +188,7 @@ async function geminiJudge(body, env) {
       method: 'POST', headers: { 'x-goog-api-key': env.GEMINI_API_KEY, 'content-type': 'application/json' },
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: GEMINI_PROMPT(today, step.search) }] },
-        contents: [{ role: 'user', parts: [{ text: `Claim: "${claim}"\n\nContext (video title and the line before it): ${context || 'none'}` }] }],
+        contents: [{ role: 'user', parts: [{ text: `Claim: "${claim}"\n\nContext (video title, then statements before and after the claim): ${context || 'none'}` }] }],
         ...(step.search ? { tools: [{ google_search: {} }] } : {}),
         generationConfig: { temperature: 0, maxOutputTokens: 1200 }
       })
@@ -231,8 +239,10 @@ Rules:
 - Wikipedia introductions are often out of date for current events and latest figures. For those, answer UNVERIFIABLE.
 - TRUE only if the evidence clearly confirms the whole claim. FALSE only if the evidence clearly contradicts it. MISLEADING if the evidence shows it is partly right but missing important context.
 Reply with ONLY a JSON object, no other text:
-{"verdict":"TRUE|MISLEADING|FALSE|UNVERIFIABLE","confidence":"high|medium|low","score":0,"explanation":"one or two plain sentences naming the evidence used","used":[1]}
-"score" is how accurate the claim is, 0 to 100, and must agree with the verdict: TRUE 75-98, MISLEADING 35-74, FALSE 2-34.`;
+{"verdict":"TRUE|MISLEADING|FALSE|UNVERIFIABLE","confidence":"high|medium|low","score":0,"standalone":"","explanation":"one or two plain sentences naming the evidence used","used":[1]}
+"score" is how accurate the claim is, 0 to 100, and must agree with the verdict: TRUE 75-98, MISLEADING 35-74, FALSE 2-34.
+CONTEXT: you also get the video title and the statements spoken just BEFORE and AFTER the claim. Use them to work out who "they", "he", "it" or "that" refers to, which time period and place are meant, and what the speaker actually means. Judge the claim as the speaker meant it in context, not as an isolated string. If the context shows it is a question, a joke, a hypothetical, or the speaker quoting or describing someone else's claim, answer UNVERIFIABLE and say why.
+"standalone" is the claim rewritten so it makes sense on its own (names instead of pronouns, the time period filled in), in at most 40 words. Do not add facts the speaker did not say.`;
 
 async function groqJudge(body, env) {
   const claim = String((body && body.claim) || '').slice(0, 600);
@@ -246,7 +256,7 @@ async function groqJudge(body, env) {
   for (const model of models) {
     const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST', headers: { Authorization: 'Bearer ' + env.GROQ_API_KEY, 'content-type': 'application/json' },
-      body: JSON.stringify({ model, temperature: 0, max_tokens: 1500, messages: [{ role: 'system', content: GROQ_JUDGE_PROMPT(today) }, { role: 'user', content: `Claim: "${claim}"\n\nEVIDENCE:\n${evidence}` }] })
+      body: JSON.stringify({ model, temperature: 0, max_tokens: 1500, messages: [{ role: 'system', content: GROQ_JUDGE_PROMPT(today) }, { role: 'user', content: `Claim: "${claim}"\n\nContext (video title, then statements before and after the claim): ${String((body && body.context) || '').slice(0, 1000) || 'none'}\n\nEVIDENCE:\n${evidence}` }] })
     });
     const out = await r.json().catch(() => ({}));
     if (r.ok) { j = out; break; }
@@ -291,9 +301,11 @@ You are given ONE claim from an automatically transcribed political broadcast or
 3. Verdicts: TRUE = accurate; MISLEADING = partly true, missing important context, or framed in a way that gives a wrong impression; FALSE = contradicted by reliable evidence; UNVERIFIABLE = not enough reliable evidence, or not checkable. Prefer UNVERIFIABLE over a weak FALSE.
 
 Reply with ONLY a JSON object, no other text:
-{"verdict":"TRUE|MISLEADING|FALSE|UNVERIFIABLE","confidence":"high|medium|low","score":0,"explanation":"one or two plain sentences naming the key figure or source","sources":[{"title":"","url":""}]}
+{"verdict":"TRUE|MISLEADING|FALSE|UNVERIFIABLE","confidence":"high|medium|low","score":0,"standalone":"","explanation":"one or two plain sentences naming the key figure or source","sources":[{"title":"","url":""}]}
 "score" is how accurate the claim is, 0 to 100 (100 = fully accurate), and must agree with the verdict: TRUE 75-98, MISLEADING 35-74, FALSE 2-34.
-Use at most 3 sources, taken from your search.`;
+Use at most 3 sources, taken from your search.
+CONTEXT: you also get the video title and the statements spoken just BEFORE and AFTER the claim. Use them to work out who "they", "he", "it" or "that" refers to, which time period and place are meant, and what the speaker actually means. Judge the claim as the speaker meant it in context, not as an isolated string. If the context shows it is a question, a joke, a hypothetical, or the speaker quoting or describing someone else's claim, answer UNVERIFIABLE and say why.
+"standalone" is the claim rewritten so it makes sense on its own (names instead of pronouns, the time period filled in), in at most 40 words. Do not add facts the speaker did not say.`;
 
 async function judge(body, env) {
   if (!env.ANTHROPIC_API_KEY && env.GEMINI_API_KEY) return geminiJudge(body, env);   // free tier, Google Search when allowed
@@ -301,7 +313,7 @@ async function judge(body, env) {
   if (!env.ANTHROPIC_API_KEY) throw new Error('No claim-research key is set on the worker (GEMINI_API_KEY, GROQ_API_KEY or ANTHROPIC_API_KEY)');
   const claim = String((body && body.claim) || '').slice(0, 600);
   if (claim.split(/\s+/).length < 4) throw new Error('Claim is too short');
-  const context = String((body && body.context) || '').slice(0, 800);
+  const context = String((body && body.context) || '').slice(0, 1400);
   const today = /^\d{4}-\d{2}-\d{2}$/.test((body && body.today) || '') ? body.today : new Date().toISOString().slice(0, 10);
   const r = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -311,7 +323,7 @@ async function judge(body, env) {
       max_tokens: 900,
       system: JUDGE_PROMPT(today),
       tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3, blocked_domains: ['facebook.com', 'x.com', 'twitter.com', 'reddit.com', 'tiktok.com', 'instagram.com', 'youtube.com'] }],
-      messages: [{ role: 'user', content: `Claim: "${claim}"\n\nContext (video title and the lines just before it): ${context || 'none'}` }]
+      messages: [{ role: 'user', content: `Claim: "${claim}"\n\nContext (video title, then statements before and after the claim): ${context || 'none'}` }]
     })
   });
   const j = await r.json().catch(() => ({}));

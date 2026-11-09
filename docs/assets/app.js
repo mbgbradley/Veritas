@@ -108,7 +108,7 @@
   /* ================= SESSION RESET ================= */
   const Q = { items: [], active: 0, max: 3, gen: 0 };
   function reset() {
-    stopTab(); stopLocal(false);
+    stopTab(false); stopLocal(false);
     clearInterval(state.pollTimer); state.pollTimer = null;
     if (state.rec) { try { state.rec.stop(); } catch {} }
     Q.items.length = 0; Q.gen++;
@@ -136,7 +136,8 @@
   async function run(c) {
     const g = Q.gen;
     try {
-      const r = await V.checker.check(c.text, ctxFor(c));
+      const lead = (/^(they|he|she|it|this|that|these|those|his|her|their|its|such|there|which|and|but|so|because)\b/i.test(c.text) || wc(c.text) < 8) ? (surround(c, 1, 0).before[0] || '') : '';
+      const r = await V.checker.check(c.text, () => ctxLater(c), { lead });
       if (g !== Q.gen) return;
       resolve(c, r.verdict, r.detail, r.sources, r.score, r.weight, r.ai);
     } catch (e) {
@@ -144,10 +145,25 @@
       resolve(c, 'NOMATCH', 'Lookup failed: ' + esc(e.message), []); errOnce(e.message);
     }
   }
-  function ctxFor(c) {
-    const i = c.line ? state.lines.indexOf(c.line) : -1, prev = i > 0 ? state.lines[i - 1].text : '';
-    const title = state.video && state.video.title ? 'Video: ' + state.video.title + (state.video.channel ? ' (' + state.video.channel + ')' : '') + '. ' : '';
-    return (title + (prev ? 'Previous line: ' + prev : '')).slice(0, 700);
+  // The statements around a claim (every sentence, in order), so a claim is judged in context, not as an isolated string.
+  function surround(c, nb, na) {
+    const all = []; state.lines.forEach(L => L.sents.forEach(x => all.push(x)));
+    const k = norm(c.text), i = all.findIndex(x => norm(x) === k);
+    return i < 0 ? { before: [], after: [] } : { before: all.slice(Math.max(0, i - nb), i), after: all.slice(i + 1, i + 1 + na) };
+  }
+  const titleCtx = () => state.video && state.video.title ? 'Video: ' + state.video.title + (state.video.channel ? ' (' + state.video.channel + ')' : '') + '. ' : '';
+  // Used when a claim reaches the AI step: while listening live, wait up to 6 s for the sentences that follow it.
+  async function ctxLater(c) {
+    const t0 = Date.now();
+    while ((local || tab) && Date.now() - t0 < 6000 && surround(c, 0, 2).after.length < 2) await new Promise(r => setTimeout(r, 500));
+    const s = surround(c, 3, 2);
+    return (titleCtx() + 'Before: ' + (s.before.join(' ') || 'nothing') + ' | After: ' + (s.after.join(' ') || 'nothing')).slice(0, 1400);
+  }
+  function factPrompt(c) {
+    const s = surround(c, 2, 2);
+    return `Fact-check this statement from a political video or broadcast. Be neutral. Cite FactCheck.org first if it has covered this, then other credible non-partisan outlets or official data (AP, Reuters, PolitiFact, government statistics).\n\nStatement: "${c.text}"\n` +
+      (s.before.length ? `Said just before: ${s.before.join(' ')}\n` : '') + (s.after.length ? `Said just after: ${s.after.join(' ')}\n` : '') + (titleCtx() ? titleCtx() + '\n' : '') +
+      `\nJudge it as the speaker meant it in context. Reply with: 1) Verdict: True, Misleading, False or Unverifiable. 2) A truth score from 0 to 100. 3) One or two sentences of explanation. 4) Two or three sources with links.`;
   }
   function resolve(c, verdict, detail, sources, score, weight, ai) {
     c.verdict = verdict; c.detail = detail || ''; c.sources = sources || [];
@@ -445,12 +461,11 @@
   }
 
   /* ================= FEED, METERS, FLAGS ================= */
-  // Zero-cost fallback: copy a ready-made fact-check prompt and open Gemini, where web search is built in.
-  function askGemini(c) {
-    const ctx = ctxFor(c);
-    const prompt = `Fact-check this statement from a political video or broadcast.\nStatement: "${c.text}"${ctx ? '\nContext: ' + ctx : ''}\n\nReply with: 1) Verdict: True, Misleading, False or Unverifiable. 2) A truth score from 0 to 100. 3) One or two sentences of explanation. 4) Two or three sources from credible, non-partisan outlets or official data, with links.`;
-    try { navigator.clipboard.writeText(prompt).then(() => toast('Prompt copied. Paste it into Gemini.'), () => toast('Could not copy. Paste the statement into Gemini yourself.')); } catch { toast('Could not copy. Paste the statement into Gemini yourself.'); }
-    window.open('https://gemini.google.com/app', '_blank', 'noopener');
+  // Free, manual second opinions with live web search: Perplexity opens with the question filled in; Gemini cannot be pre-filled, so the prompt is copied.
+  function askAI(c, which) {
+    const prompt = factPrompt(c);
+    try { navigator.clipboard.writeText(prompt).then(() => toast(which === 'gemini' ? 'Prompt copied. Paste it into Gemini.' : 'Opening Perplexity (prompt also copied).'), () => {}); } catch {}
+    window.open(which === 'gemini' ? 'https://gemini.google.com/app' : 'https://www.perplexity.ai/search?q=' + encodeURIComponent(prompt.slice(0, 1500)), '_blank', 'noopener');
   }
   function renderCards() {
     const box = $('#cards'); box.innerHTML = '';
@@ -466,10 +481,10 @@
       const sc = c.verdict in DEFAULT_SCORE ? cardScore(c) : null;
       const pct = sc != null ? `<span class="pct" title="${c.ai ? 'Estimated by AI' : 'From the published rating'}">${c.ai ? '≈ ' : ''}${sc}% true</span>` : '';
       const bar = sc != null ? `<div class="sbar" role="img" aria-label="${sc} percent true"><i style="width:${sc}%"></i></div>` : '';
-      const ask = c.verdict === 'NOMATCH' ? `<div class="acts"><a class="askg" target="_blank" rel="noopener" href="https://www.factcheck.org/search/#gsc.tab=0&gsc.q=${encodeURIComponent(c.text.slice(0, 120))}">Search FactCheck.org ↗</a><button type="button" class="askg" title="Copies a ready-made prompt and opens Gemini">Ask Gemini ↗</button></div>` : '';
+      const more = c.text ? `<details class="more"${c.verdict === 'NOMATCH' ? ' open' : ''}><summary>Search this statement</summary><div class="acts"><a class="askg" target="_blank" rel="noopener" href="https://www.factcheck.org/search/#gsc.tab=0&gsc.q=${encodeURIComponent(c.text.slice(0, 120))}">FactCheck.org ↗</a><button type="button" class="askg" data-ask="perplexity" title="Opens Perplexity with the question filled in (also copied)">Perplexity ↗</button><button type="button" class="askg" data-ask="gemini" title="Copies a ready-made prompt and opens Gemini">Gemini ↗</button></div></details>` : '';
       el.innerHTML = `<div class="vh">${ICON[c.verdict]}<span>${LABEL[c.verdict]}${sp}</span>${pct}${when ? `<button type="button" class="t">${when}</button>` : ''}</div>
-        <div class="q">“${esc(c.text)}”</div>${bar}${tags}${c.detail ? `<div class="d">${c.detail}</div>` : ''}${srcs}${ask}`;
-      const ag = el.querySelector('button.askg'); if (ag) ag.addEventListener('click', () => askGemini(c));
+        <div class="q">“${esc(c.text)}”</div>${bar}${tags}${c.detail ? `<div class="d">${c.detail}</div>` : ''}${srcs}${more}`;
+      el.querySelectorAll('button.askg').forEach(b => b.addEventListener('click', () => askAI(c, b.dataset.ask)));
       const tb = el.querySelector('.t'); if (tb) tb.addEventListener('click', () => focusCard(c));
       box.appendChild(el);
     });
@@ -709,7 +724,15 @@
     if (!self) ensureSession();
     setStatus('listening');
   }
-  const shareOpts = self => ({ video: { width: 2, height: 2, frameRate: 1 }, audio: true, systemAudio: 'exclude', ...(self ? { preferCurrentTab: true, selfBrowserSurface: 'include' } : {}) });
+  // Chrome always shows its own share prompt and a website cannot answer it for you. These hints make it as short as Chrome allows:
+  // the "Chrome Tab" page is pre-selected, whole-screen options are hidden, and the tab's audio is requested without Chrome's
+  // echo cancellation / noise suppression / gain control, which distort tab audio and hurt speech recognition.
+  const shareOpts = self => ({
+    video: { width: 2, height: 2, frameRate: 1, displaySurface: 'browser' },
+    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, suppressLocalAudioPlayback: false },
+    systemAudio: 'exclude', monitorTypeSurfaces: 'exclude', surfaceSwitching: 'exclude',
+    ...(self ? { preferCurrentTab: true, selfBrowserSurface: 'include' } : {})
+  });
   const canShare = () => !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia);
 
   function ingestLive(text, speaker, t) {
@@ -725,7 +748,9 @@
   async function startAudio(self, quiet) {
     // The service info loads in the background; give it a moment so we pick the right engine (Chrome needs the share prompt soon after the click).
     if (V.infoPending) await Promise.race([V.infoPending, new Promise(r => setTimeout(r, 1500))]);
-    return hasRemote() || !(V.info && V.info.deepgram) ? startLocal({ self, quiet }) : startCloud({ self, quiet });
+    const dg = !!(V.info && V.info.deepgram), eng = S.engine || 'auto';
+    const useDeepgram = eng === 'deepgram' ? dg : eng === 'whisper' ? false : dg;      // auto: Deepgram (Nova-3) whenever its key is set
+    return useDeepgram || !hasRemote() && dg ? startCloud({ self, quiet }) : startLocal({ self, quiet });
   }
 
   // 16-bit mono WAV from 16 kHz samples (what the speech service accepts).
@@ -742,9 +767,10 @@
   V.wavBlob = wavBlob;
 
   /* ---------- cloud ---------- */
-  function stopTab() {
+  function stopTab(flush = true) {
     if (!tab) return;
     const t = tab; tab = null;
+    if (t.Dg) { if (flush) flushTail(t.Dg); else clearTimeout(t.Dg.tailTimer); }
     try { if (t.ws.readyState === 1) t.ws.send(JSON.stringify({ type: 'CloseStream' })); t.ws.close(); } catch {}
     try { t.proc.disconnect(); t.ctx.close(); } catch {}
     try { t.stream.getTracks().forEach(x => x.stop()); } catch {}
@@ -769,16 +795,18 @@
     const src = ctx.createMediaStreamSource(new MediaStream(at));
     const proc = ctx.createScriptProcessor(4096, 1, 1);
     const mute = ctx.createGain(); mute.gain.value = 0;
-    const params = ['encoding=linear16', 'sample_rate=16000', 'channels=1', 'model=nova-2', 'language=en-US', 'punctuate=true', 'interim_results=true', 'utterance_end_ms=1000', 'smart_format=true', 'diarize=true'].join('&');
+    const params = ['encoding=linear16', 'sample_rate=16000', 'channels=1', 'model=nova-3', 'language=en-US', 'punctuate=true', 'interim_results=true', 'endpointing=700', 'utterance_end_ms=1500', 'smart_format=true', 'diarize=true'].join('&');
     const ws = new WebSocket('wss://api.deepgram.com/v1/listen?' + params, ['bearer', token]);
     const startMs = Date.now();
-    tab = { stream, ctx, proc, ws };
+    const Dg = { tail: '', tailT: null, tailTimer: 0, spk: 'A' };
+    tab = { stream, ctx, proc, ws, Dg };
     let buf = '', bufStart = null, spk = 'A', base = 0;
-    const flush = () => {
+    // Deepgram's final pieces go through the same complete-sentence assembly as Whisper. A pause of 1.5 s releases anything held back.
+    const flush = force => {
       const text = buf.trim(), t = bufStart != null ? base + bufStart : clockNow(self, startMs);
       buf = ''; bufStart = null;
-      if (interimEl) { interimEl.remove(); interimEl = null; }
-      if (text) splitSentences(text).forEach(s => ingestLive(s, spk, t));
+      if (text) feedSpeech(Dg, text, t, Math.max(1, wc(text) / 2.5), spk);
+      if (force) flushTail(Dg);
     };
     ws.onopen = () => {
       base = clockNow(self, startMs);
@@ -794,15 +822,15 @@
     };
     ws.onmessage = ev => {
       let d; try { d = JSON.parse(ev.data); } catch { return; }
-      if (d.type === 'UtteranceEnd') { flush(); return; }
+      if (d.type === 'UtteranceEnd') { flush(true); return; }
       const alt = d.channel && d.channel.alternatives && d.channel.alternatives[0];
       if (!alt || !alt.transcript) return;
       const w0 = alt.words && alt.words[0]; if (w0 && w0.speaker != null) spk = w0.speaker === 1 ? 'B' : 'A';
       const text = alt.transcript.trim(); if (!text) return;
-      if (d.is_final) { if (!buf) bufStart = w0 ? w0.start : null; buf += (buf ? ' ' : '') + text; if (d.speech_final) flush(); }
+      if (d.is_final) { if (!buf) bufStart = w0 ? w0.start : null; buf += (buf ? ' ' : '') + text; if (d.speech_final) flush(false); }
       else {
         if (!interimEl) { document.querySelectorAll('#capBody .empty').forEach(e => e.remove()); interimEl = document.createElement('p'); interimEl.className = 'line interim'; interimEl.innerHTML = '<span class="sp">…</span><span class="tx"></span>'; placeLine(interimEl); }
-        interimEl.querySelector('.tx').textContent = (buf ? buf + ' ' : '') + text; scrollLatest();
+        interimEl.querySelector('.tx').textContent = [Dg.tail, buf, text].filter(Boolean).join(' '); scrollLatest();
       }
     };
     ws.onerror = () => toast('Live transcription connection problem.');
@@ -868,19 +896,20 @@
     if (rest && wc(rest.text) >= 45) { out.push(rest); rest = null; }                              // a run-on: do not hold it forever
     return { out, rest };
   }
-  function feedSpeech(L, text, t0, secs) {
+  function feedSpeech(L, text, t0, secs, spk) {
+    if (spk) L.spk = spk;
     const r = assemble(L.tail, L.tailT, text, t0, secs);
     clearInterim();
-    r.out.forEach(p => ingestLive(p.text, 'A', p.t));
+    r.out.forEach(p => ingestLive(p.text, L.spk || 'A', p.t));
     L.tail = r.rest ? r.rest.text : ''; L.tailT = r.rest ? r.rest.t : null;
     clearTimeout(L.tailTimer);
-    if (L.tail) { showInterim(L.tail); L.tailTimer = setTimeout(() => flushTail(L), 7000); }
+    if (L.tail) { showInterim(L.tail); L.tailTimer = setTimeout(() => flushTail(L), L.remote ? 17000 : 7000); }
   }
   function flushTail(L) {
     clearTimeout(L.tailTimer);
     if (!L.tail) return;
     const text = L.tail, t = L.tailT; L.tail = ''; L.tailT = null;
-    clearInterim(); ingestLive(text, 'A', t);
+    clearInterim(); ingestLive(text, L.spk || 'A', t);
   }
   V.assemble = assemble;
   const HALLUCINATION = /^\s*(\[[^\]]*\]|\([^)]*\)|thank you\.?|thanks for watching\.?|thanks\.?|you\.?|bye\.?|\.+)\s*$/i;
@@ -901,10 +930,17 @@
     L.pump();
   }
   // Hosted Whisper: send one chunk to the service and feed the answer back through the same path as the on-device model.
+  // What Whisper is told about the audio: the video title and the words just before this piece (keeps names and sentences consistent).
+  function whisperPrompt(L) {
+    const title = state.video && state.video.title ? state.video.title + '.' : '';
+    const prev = state.lines.slice(-2).map(x => x.text).join(' ');
+    return (title + ' ' + prev + ' ' + (L.tail || '')).replace(/\s+/g, ' ').trim().slice(-380);
+  }
   async function sendRemote(L, id, audio) {
     let text = '', failed = '', via = '';
     try {
-      const r = await fetch(S.worker.replace(/\/$/, '') + '/transcribe', { method: 'POST', headers: { 'content-type': 'audio/wav' }, body: wavBlob(audio, 16000) });
+      const pr = whisperPrompt(L);
+      const r = await fetch(S.worker.replace(/\/$/, '') + '/transcribe' + (pr ? '?p=' + encodeURIComponent(pr) : ''), { method: 'POST', headers: { 'content-type': 'audio/wav' }, body: wavBlob(audio, 16000) });
       const j = await r.json().catch(() => ({}));
       if (r.ok) { text = j.text || ''; via = j.via || ''; }
       else {
@@ -980,7 +1016,11 @@
       if (tail >= 2) cut = n;
       else {
         for (let i = n - 1; i >= 0; i--) { if (bl[i].quiet && (i + 1) * SEC >= cfgL.minSec) { cut = i + 1; break; } }
-        if (!cut && n * SEC >= cfgL.maxSec) cut = n;
+        if (!cut && n * SEC >= cfgL.maxSec) {          // no pause for a long time: cut at the quietest moment of the last 3 s so a word is not split
+          let best = n - 1, bv = Infinity;
+          for (let i = n - 1; i >= Math.max(0, n - Math.round(3 / SEC)); i--) if ((i + 1) * SEC >= cfgL.minSec && bl[i].r < bv) { bv = bl[i].r; best = i; }
+          cut = best + 1;
+        }
       }
       if (!cut) return;
       send(Math.min(cut, Math.floor(cfgL.hardSec / SEC)));
@@ -989,7 +1029,8 @@
       if (local !== L) return;
       const f = new Float32Array(e.inputBuffer.getChannelData(0));
       let s = 0; for (let i = 0; i < f.length; i++) s += f[i] * f[i];
-      L.blocks.push({ f, quiet: Math.sqrt(s / f.length) < cfgL.quietRms });
+      const rms = Math.sqrt(s / f.length);
+      L.blocks.push({ f, quiet: rms < cfgL.quietRms, r: rms });
       if (L.blocks.length > 120 / SEC) L.blocks.splice(0, 40);           // never hold more than about two minutes
       L.pump();
     };
@@ -1068,9 +1109,10 @@
   $('#btnRefresh').addEventListener('click', () => loadBrowse(true));
   $('#btnTrend').addEventListener('click', () => loadTrending(true));
 
-  $('#btnSettings').addEventListener('click', () => { $('#selfTest').innerHTML = ''; $('#keyInput').value = S.key; $('#cxInput').value = S.cx; $('#modelInput').value = S.localModel; $('#workerInput').value = S.worker; $('#dlgSettings').showModal(); });
+  $('#btnSettings').addEventListener('click', () => { $('#selfTest').innerHTML = ''; $('#keyInput').value = S.key; $('#cxInput').value = S.cx; $('#modelInput').value = S.localModel; $('#engineInput').value = S.engine; $('#workerInput').value = S.worker; $('#dlgSettings').showModal(); });
   $('#saveKey').addEventListener('click', () => {
     S.key = $('#keyInput').value.trim(); S.cx = $('#cxInput').value.trim(); S.worker = $('#workerInput').value.trim();
+    S.engine = $('#engineInput').value;
     const mdl = $('#modelInput').value; if (mdl !== S.localModel) { S.localModel = mdl; stopLocal(); killLocalWorker(); }
     V.saveSettings();
     toast('Saved in this browser.'); loadInfo(); state.feed = null; state.shorts = null; loadBrowse(true); loadTrending(false);

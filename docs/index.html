@@ -120,6 +120,9 @@
     <p class="muted">Saved only in this browser. Enable <b>Fact Check Tools API</b> and <b>YouTube Data API v3</b> for your Google key, then restrict the key to your site address. Press <b>Test setup</b> to see what works.</p>
     <label>Google API key<input id="keyInput" type="password" autocomplete="off" placeholder="AIza…"></label>
     <label>Transcript service URL<input id="workerInput" autocomplete="off" placeholder="https://veritas-service.yourname.workers.dev"></label>
+    <label>Speech engine
+      <select id="engineInput"><option value="auto">Auto: best available (Deepgram if its key is set, else free hosted Whisper)</option><option value="whisper">Free hosted Whisper (Groq)</option><option value="deepgram">Deepgram (uses your free credit)</option></select>
+    </label>
     <label>Free-mode speech model
       <select id="modelInput"><option value="onnx-community/whisper-tiny.en">Fast: tiny (smaller download, more mistakes)</option><option value="onnx-community/whisper-base.en">Better: base (larger download, slower)</option></select>
     </label>

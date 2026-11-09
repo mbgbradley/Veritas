@@ -61,7 +61,7 @@ V.checker = (() => {
 
   const cache = new Map();
   // site: optional publisher filter (Google's reviewPublisherSiteFilter), e.g. 'factcheck.org'.
-  async function factCheckSearch(text, site) {
+  async function factCheckSearch(text, site, simText) {
     const q = text.length > 220 ? text.slice(0, 220) : text;
     const r = await fetch(`https://factchecktools.googleapis.com/v1alpha1/claims:search?query=${encodeURIComponent(q)}&languageCode=en-US&pageSize=${site ? 5 : 8}${site ? '&reviewPublisherSiteFilter=' + encodeURIComponent(site) : ''}&key=${encodeURIComponent(V.settings.key)}`);
     const j = await r.json();
@@ -69,7 +69,7 @@ V.checker = (() => {
     const hits = [];
     (j.claims || []).forEach(c => (c.claimReview || []).forEach(cr => hits.push({
       claim: c.text, claimant: c.claimant, publisher: cr.publisher && cr.publisher.name, url: cr.url, rating: cr.textualRating,
-      sim: sim(text, c.text || '')
+      sim: sim(simText || text, c.text || '')
     })));
     return hits;
   }
@@ -90,7 +90,9 @@ V.checker = (() => {
   const resetBudget = () => { judgeLeft = V.config.judge.maxPerSession; };
   const judgeOn = () => !!(V.settings.worker && V.info && (V.info.anthropic || V.info.judge));
 
-  async function check(text, ctx) {
+  // ctx: a string, or a function (may be async) returning the surrounding statements. opts.lead: the sentence before, used to
+  // search for claims that start with "they", "it", "that"... and would otherwise match nothing.
+  async function check(text, ctx, opts) {
     const k = text.toLowerCase().replace(/\s+/g, ' ').trim();
     if (cache.has(k)) return cache.get(k);
     const p = (async () => {
@@ -98,9 +100,10 @@ V.checker = (() => {
       if (V.settings.key) {
         // FactCheck.org is asked on its own (so its reviews are not crowded out), at the same time as every other publisher.
         const first = V.config.checkers[0] && V.config.checkers[0].host;
+        const q = opts && opts.lead ? (opts.lead.slice(-100) + ' ' + text) : text;
         const [pri, all] = await Promise.all([
-          first ? factCheckSearch(text, first).catch(() => []) : Promise.resolve([]),
-          factCheckSearch(text)
+          first ? factCheckSearch(q, first, text).catch(() => []) : Promise.resolve([]),
+          factCheckSearch(q, null, text)
         ]);
         const seenUrl = new Set();
         const hits = [...pri, ...all].filter(h => h.sim >= 0.5 && h.url && !seenUrl.has(h.url) && seenUrl.add(h.url));
@@ -131,12 +134,13 @@ V.checker = (() => {
       // Tier 3: AI research with web search (needs ANTHROPIC_API_KEY on the worker)
       if (judgeOn() && judgeLeft > 0) {
         judgeLeft--;
-        const j = await V.yt.judge(text, ctx || '');
+        const context = typeof ctx === 'function' ? await ctx() : (ctx || '');
+        const j = await V.yt.judge(text, context);
         const sources = (j.sources || []).map(s => ({ url: s.url, label: s.title || host(s.url) }));
         if (j.verdict === 'TRUE' || j.verdict === 'MISLEADING' || j.verdict === 'FALSE') {
           const label = { 'groq-wikipedia': 'Limited AI check</b> using Wikipedia excerpts only, not a web search', 'gemini-knowledge': 'Limited AI check</b> from the model’s own knowledge, with no live web search', 'gemini-grounded': 'AI research</b> using Google Search results through Gemini' }[j.engine] || 'AI research</b> using web sources';
           return { verdict: j.verdict, sources, ai: true, score: bandScore(j.verdict, j.score), weight: j.confidence === 'high' ? 0.8 : 0.5,
-            detail: `<b>${label}, not a published fact-check${j.confidence ? ' (confidence: ' + esc(j.confidence) + ')' : ''}. ${esc(j.explanation)}` };
+            detail: `<b>${label}, not a published fact-check${j.confidence ? ' (confidence: ' + esc(j.confidence) + ')' : ''}. ${esc(j.explanation)}` + (j.standalone && j.standalone.toLowerCase().replace(/\W+/g, ' ').trim() !== text.toLowerCase().replace(/\W+/g, ' ').trim() ? ` <i>Checked in context as: “${esc(j.standalone)}”</i>` : '') };
         }
         return { verdict: 'NOMATCH', sources, detail: `<b>Could not verify.</b> ${esc(j.explanation || 'Not enough reliable evidence found.')}` };
       }

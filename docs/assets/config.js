@@ -67,12 +67,13 @@ V.store = {
 V.config.local = { minSec: 3, maxSec: 8, hardSec: 28, quietRms: 0.004 };   // free-mode chunking (seconds)
 // Hosted Whisper chunking (Groq's free tier allows 20 requests a minute; one request at a time and at least minSec
 // of audio per request keeps this well under that).
-V.config.remote = { minSec: 4, maxSec: 8, hardSec: 12, quietRms: 0.004 };
+V.config.remote = { minSec: 6, maxSec: 14, hardSec: 20, quietRms: 0.004 };   // longer pieces cut at pauses: more context per request, fewer split words
 V.config.judge ={ maxPerSession: 30 };                                    // AI-researched claims per session (controls cost)
 V.settings = {
   localModel: V.store.get('localModel', '') || 'onnx-community/whisper-tiny.en',
+  engine: V.store.get('engine', '') || 'auto',                 // auto = Deepgram when its key is set, otherwise hosted Whisper
   key: V.store.get('key', '') || V.config.defaults.key,        // Google API key (Fact Check Tools, YouTube Data)
   cx: V.store.get('cx', ''),          // Programmable Search Engine ID for the Tier 2 sources
   worker: V.store.get('worker', '') || V.config.defaults.worker   // Transcript service URL (see GUIDE-CLOUDFLARE.md)
 };
-V.saveSettings = () => { V.store.set('localModel', V.settings.localModel); V.store.set('key', V.settings.key); V.store.set('cx', V.settings.cx); V.store.set('worker', V.settings.worker); };
+V.saveSettings = () => { V.store.set('engine', V.settings.engine); V.store.set('localModel', V.settings.localModel); V.store.set('key', V.settings.key); V.store.set('cx', V.settings.cx); V.store.set('worker', V.settings.worker); };
