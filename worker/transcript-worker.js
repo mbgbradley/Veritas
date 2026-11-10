@@ -324,8 +324,8 @@ async function llmJson(env, system, user, maxTokens) {
 const ANALYZE_PROMPT = today => `You prepare ONE statement from an automatically transcribed political video for fact-checking. Today is ${today}.
 Reply with ONLY a JSON object: {"checkable":true,"kind":"fact","standalone":"","queries":["",""]}
 - checkable is true ONLY for a specific statement about the past or present that evidence could confirm or refute: a number, record, date, event, official action, quote, law, or public fact.
-- checkable is false for opinions, predictions, promises, slogans, insults, jokes, questions, vague statements, and a speaker describing what someone else claims. Set "kind" to opinion, prediction, question, quote or vague.
-- "standalone": rewrite the statement so it makes sense on its own, using the surrounding statements: names instead of he/she/they/it/that, the time period and place filled in. At most 40 words. Never add a fact the speaker did not say.
+- checkable is false for opinions, predictions (anything about what will or might happen, or how likely something is), promises, slogans, insults, jokes, questions, vague statements, a speaker explaining their own reasons, motives or feelings ("I did this because I thought..."), and a speaker describing what someone else claims. Set "kind" to opinion, prediction, question, quote or vague.
+- "standalone": rewrite the statement so it makes sense on its own, keeping its exact meaning, using the surrounding statements: names instead of he/she/they/it/that, the time period and place filled in. At most 40 words. Never add a fact the speaker did not say.
 - "queries": two short web search queries (under 12 words each) a fact-checker would type. Use names, figures and years. Make the second one end with "fact check".`;
 
 const VERDICT_PROMPT = today => `You are a careful, neutral fact-checker. Today is ${today}.
@@ -334,9 +334,12 @@ You get ONE claim and numbered EVIDENCE items. Judge the claim ONLY from the evi
 - Official data and news reports count only if they directly state the figure or event in the claim. Check the dates: old evidence does not prove a current figure.
 - TRUE: the evidence confirms the whole claim. FALSE: the evidence clearly contradicts it. MISLEADING: partly right, but missing important context or framed to give a wrong impression.
 - If the evidence does not directly address the claim, answer UNVERIFIABLE. Prefer UNVERIFIABLE over a guess.
+- ABSENCE OF EVIDENCE IS NOT FALSE. If the evidence merely does not mention the claim, the answer is UNVERIFIABLE, never FALSE. FALSE needs an evidence item that states the opposite. TRUE needs an item that states the same thing.
+- Judge the claim as worded. Do not turn it into a different claim.
+- "quote": copy a short passage (under 25 words) EXACTLY from the evidence that supports your verdict. It is required for TRUE, MISLEADING and FALSE.
 - "score" is how accurate the claim is, 0 to 100, and must agree: TRUE 75-98, MISLEADING 35-74, FALSE 2-34.
 - "used" lists the numbers of the evidence items your verdict rests on. A verdict with an empty "used" is not allowed.
-Reply with ONLY a JSON object: {"verdict":"TRUE|MISLEADING|FALSE|UNVERIFIABLE","confidence":"high|medium|low","score":0,"explanation":"one or two plain sentences naming the figures or sources","used":[1]}`;
+Reply with ONLY a JSON object: {"verdict":"TRUE|MISLEADING|FALSE|UNVERIFIABLE","confidence":"high|medium|low","score":0,"quote":"","explanation":"one or two plain sentences naming the figures or sources","used":[1]}`;
 
 async function tavilySearch(query, key, domains) {
   const r = await fetch('https://api.tavily.com/search', {
@@ -373,11 +376,24 @@ async function gatherEvidence(env, standalone, queries, reviews) {
   return { evidence: out, notes };
 }
 
+// Cheap rules that catch what a small model gets wrong: predictions and a speaker's own motives are not checkable facts.
+const FUTURE_RE = /\b(will|won'?t|will not|going to|gonna|probabilit\w*|likelihood|likely to|chances? (?:are|of)|predict\w*|expect(?:s|ed)? to)\b/i;
+const MOTIVE_RE = /\b(i|we) (?:think|thought|believe|believed|feel|felt|hope|wish|want|wanted|disagree\w*|guess)\b/i;
+function preFilter(claim) { return FUTURE_RE.test(claim) ? 'prediction' : MOTIVE_RE.test(claim) ? 'opinion' : ''; }
+const ABSENCE_RE = /\b(?:does not|doesn'?t|did not|didn'?t|do not|don'?t|no|nor|without|not)\s+(?:\w+\s+){0,2}(?:mention|mentions|address|addresses|state|states|say|says|provide|provides|contain|contains|show|shows|support|supports|confirm|confirms|include|includes|specify|specifies)\b|\bno (?:direct |clear |explicit )?(?:evidence|mention|information|source)|\bnot (?:directly )?(?:addressed|mentioned|supported|stated)\b/i;
+const tokSet = t => new Set(normTxt(t).split(' ').filter(w => w.length > 2));
+function quoteSupported(quote, items) {
+  const q = [...tokSet(quote)]; if (q.length < 3) return false;
+  return items.some(e => { const T = tokSet(e.title + ' ' + e.text); return q.filter(w => T.has(w)).length / q.length >= 0.8; });
+}
+
 async function ragJudge(body, env) {
   const claim = String((body && body.claim) || '').slice(0, 600);
   if (claim.split(/\s+/).length < 4) throw new Error('Claim is too short');
   const context = String((body && body.context) || '').slice(0, 1400);
   const today = /^\d{4}-\d{2}-\d{2}$/.test((body && body.today) || '') ? body.today : new Date().toISOString().slice(0, 10);
+  const pre = preFilter(claim);
+  if (pre) return { verdict: 'UNVERIFIABLE', confidence: 'low', explanation: `Not a checkable factual claim (${pre}).`, score: null, standalone: claim, sources: [], engine: 'rag', skip: true };
   // 1. analyze
   const a = await llmJson(env, ANALYZE_PROMPT(today), `Statement: "${claim}"\n\nContext (video title, then statements before and after): ${context || 'none'}`, 400);
   const standalone = String(a.out.standalone || claim).replace(/\s+/g, ' ').trim().slice(0, 300) || claim;
@@ -394,8 +410,12 @@ async function ragJudge(body, env) {
   const v = await llmJson(env, VERDICT_PROMPT(today), `Claim: "${standalone}"\n\nSurrounding statements, for meaning only: ${context.slice(0, 700) || 'none'}\n\nEVIDENCE:\n${ev}`, 450);
   const used = [...new Set((Array.isArray(v.out.used) ? v.out.used : []).map(Number).filter(n => Number.isInteger(n) && n >= 1 && n <= evidence.length))];
   const out = { ...v.out };
-  if (['TRUE', 'MISLEADING', 'FALSE'].includes(String(out.verdict).toUpperCase()) && !used.length) { out.verdict = 'UNVERIFIABLE'; out.explanation = 'The model gave a verdict without citing any evidence, so it was discarded.'; }
   out.verdict = String(out.verdict || '').toUpperCase();
+  const decided = ['TRUE', 'MISLEADING', 'FALSE'].includes(out.verdict);
+  const cited = used.map(n => evidence[n - 1]);
+  if (decided && !used.length) { out.verdict = 'UNVERIFIABLE'; out.explanation = 'The model gave a verdict without citing any evidence, so it was discarded.'; }
+  else if (decided && ABSENCE_RE.test(String(out.explanation || ''))) { out.verdict = 'UNVERIFIABLE'; out.explanation = 'The sources found do not directly address this claim, so it could not be verified.'; }
+  else if (decided && !quoteSupported(out.quote, cited)) { out.verdict = 'UNVERIFIABLE'; out.explanation = 'The model could not point to wording in the sources that supports its verdict, so it was discarded.'; }
   out.standalone = standalone;
   const done = finalizeJudgment(out, 'rag:' + v.model + (env.TAVILY_API_KEY ? '+web' : ''), 'medium');
   const pick = used.length ? used.map(n => evidence[n - 1]) : evidence.slice(0, 2);

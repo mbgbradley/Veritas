@@ -255,3 +255,13 @@ Claims are now checked in three steps, all inside your Worker:
 - To try a different model, set the text variable `RAG_MODEL` (for example `@cf/mistral/mistral-7b-instruct-v0.1`).
 - `JUDGE_ENGINE` = `rag`, `gemini`, `anthropic` or `groq` forces one engine. Automatic order: Anthropic key, then RAG, then Gemini, then Groq+Wikipedia.
 - "Search this statement" now offers Gemini and Claude. Claude opens with the question filled in; choose a Haiku or Sonnet model there.
+
+## 17. v13: accuracy guards for the small-model checker
+
+Redeploy `worker/transcript-worker.js` and upload `docs/`. No new settings.
+
+What changed after the first real test (a Hegseth impeachment clip scored 20%):
+- **Absence of evidence is never FALSE.** If the sources just don't mention a claim, the result is "could not verify". A FALSE or TRUE verdict must come with a quote copied from a cited source; the Worker checks the quote really appears there and discards the verdict if not.
+- **Predictions and a speaker's own motives are not checked** ("I put it at a high probability that…", "I did this because I thought…"). They are filtered by simple rules before any model runs, which also saves free-tier quota.
+- **Repeated statements count once** in the meter (a looped video or a repeated line), and the meter says "early reading" until 5 claims are rated.
+- Optional: set `RAG_MODEL` to a larger open model on Workers AI if the 8B model still misjudges claims. It uses more of the free daily allowance.

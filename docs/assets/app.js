@@ -506,7 +506,14 @@
   const cardScore = c => c.score != null ? c.score : DEFAULT_SCORE[c.verdict];
   const cardWeight = c => (c.weight != null ? c.weight : 1) * (1 + Math.min(6, V.checker.priority(c.text)) / 6);
   function score(list) {
-    const rated = list.filter(c => c.verdict in DEFAULT_SCORE);
+    // the same statement heard again (a looped video, a repeated line) counts once
+    const seenT = [], tk = t => new Set((t.toLowerCase().match(/[a-z0-9]+/g) || []));
+    const rated = list.filter(c => {
+      if (!(c.verdict in DEFAULT_SCORE)) return false;
+      const T = tk(c.text);
+      if (seenT.some(o => { let i = 0; T.forEach(w => o.has(w) && i++); return i / (T.size + o.size - i || 1) >= 0.7; })) return false;
+      seenT.push(T); return true;
+    });
     if (!rated.length) return { n: 0, s: null };
     let sw = 0, ss = 0; rated.forEach(c => { const w = cardWeight(c); sw += w; ss += w * cardScore(c); });
     return { n: rated.length, s: ss / sw / 100 };
@@ -521,7 +528,7 @@
     const box = $('#meters'), focus = document.activeElement && document.activeElement.dataset && document.activeElement.dataset.sp;
     const mk = (title, list, sp) => {
       const sc = score(list), head = sp ? `<input data-sp="${sp}" value="${esc(state.names[sp])}" aria-label="Name for speaker ${sp}">` : `<h3>${title}</h3>`;
-      return `<div class="meter">${head}${gauge(sc)}<div class="val">${sc.s === null ? '—' : Math.round(sc.s * 100) + '%'}</div><div class="sub">${sc.n} rated${sc.n && sc.n < 3 ? ' · early reading' : ''} · truth score</div></div>`;
+      return `<div class="meter">${head}${gauge(sc)}<div class="val">${sc.s === null ? '—' : Math.round(sc.s * 100) + '%'}</div><div class="sub">${sc.n} rated${sc.n && sc.n < 5 ? ' · early reading' : ''} · truth score</div></div>`;
     };
     if (state.debate) {
       box.innerHTML = mk('', state.cards.filter(c => c.speaker === 'A'), 'A') + mk('', state.cards.filter(c => c.speaker === 'B'), 'B');
