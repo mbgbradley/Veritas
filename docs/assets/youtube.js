@@ -167,11 +167,11 @@ V.yt = (() => {
     return j.token;
   }
 
-  async function judge(claim, context) {
+  async function judge(claim, context, reviews) {
     if (!V.settings.worker) throw new Error('No transcript service set');
     const r = await fetch(V.settings.worker.replace(/\/$/, '') + '/judge', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ claim, context, today: new Date().toISOString().slice(0, 10) })
+      body: JSON.stringify({ claim, context, reviews: reviews || [], today: new Date().toISOString().slice(0, 10) })
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.error || 'Claim research failed');

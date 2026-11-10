@@ -461,11 +461,11 @@
   }
 
   /* ================= FEED, METERS, FLAGS ================= */
-  // Free, manual second opinions with live web search: Perplexity opens with the question filled in; Gemini cannot be pre-filled, so the prompt is copied.
+  // Free, manual second opinions: Claude opens with the question filled in; Gemini cannot be pre-filled, so the prompt is copied.
   function askAI(c, which) {
     const prompt = factPrompt(c);
-    try { navigator.clipboard.writeText(prompt).then(() => toast(which === 'gemini' ? 'Prompt copied. Paste it into Gemini.' : 'Opening Perplexity (prompt also copied).'), () => {}); } catch {}
-    window.open(which === 'gemini' ? 'https://gemini.google.com/app' : 'https://www.perplexity.ai/search?q=' + encodeURIComponent(prompt.slice(0, 1500)), '_blank', 'noopener');
+    try { navigator.clipboard.writeText(prompt).then(() => toast(which === 'gemini' ? 'Prompt copied. Paste it into Gemini.' : 'Opening Claude (prompt also copied).'), () => {}); } catch {}
+    window.open(which === 'gemini' ? 'https://gemini.google.com/app' : 'https://claude.ai/new?q=' + encodeURIComponent(prompt.slice(0, 1800)), '_blank', 'noopener');
   }
   function renderCards() {
     const box = $('#cards'); box.innerHTML = '';
@@ -481,7 +481,7 @@
       const sc = c.verdict in DEFAULT_SCORE ? cardScore(c) : null;
       const pct = sc != null ? `<span class="pct" title="${c.ai ? 'Estimated by AI' : 'From the published rating'}">${c.ai ? '≈ ' : ''}${sc}% true</span>` : '';
       const bar = sc != null ? `<div class="sbar" role="img" aria-label="${sc} percent true"><i style="width:${sc}%"></i></div>` : '';
-      const more = c.text ? `<details class="more"${c.verdict === 'NOMATCH' ? ' open' : ''}><summary>Search this statement</summary><div class="acts"><a class="askg" target="_blank" rel="noopener" href="https://www.factcheck.org/search/#gsc.tab=0&gsc.q=${encodeURIComponent(c.text.slice(0, 120))}">FactCheck.org ↗</a><button type="button" class="askg" data-ask="perplexity" title="Opens Perplexity with the question filled in (also copied)">Perplexity ↗</button><button type="button" class="askg" data-ask="gemini" title="Copies a ready-made prompt and opens Gemini">Gemini ↗</button></div></details>` : '';
+      const more = c.text ? `<details class="more"${c.verdict === 'NOMATCH' ? ' open' : ''}><summary>Search this statement</summary><div class="acts"><button type="button" class="askg" data-ask="gemini" title="Copies a ready-made prompt and opens Gemini">Gemini ↗</button><button type="button" class="askg" data-ask="claude" title="Opens Claude with the question filled in (also copied). Choose a Haiku or Sonnet model in Claude.">Claude ↗</button></div></details>` : '';
       el.innerHTML = `<div class="vh">${ICON[c.verdict]}<span>${LABEL[c.verdict]}${sp}</span>${pct}${when ? `<button type="button" class="t">${when}</button>` : ''}</div>
         <div class="q">“${esc(c.text)}”</div>${bar}${tags}${c.detail ? `<div class="d">${c.detail}</div>` : ''}${srcs}${more}`;
       el.querySelectorAll('button.askg').forEach(b => b.addEventListener('click', () => askAI(c, b.dataset.ask)));

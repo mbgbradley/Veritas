@@ -235,3 +235,23 @@ Whisper (Groq) is now tuned too: longer chunks (6–14 s), cuts at the quietest 
 **Search this statement.** Every card has a "Search this statement" drop-down: FactCheck.org, Perplexity and Gemini. Perplexity opens with the question pre-filled. Gemini cannot be pre-filled, so the prompt is copied and Gemini opens; paste it.
 
 **Tab audio prompt.** Chrome always asks the viewer to pick the tab, and a website cannot answer it. v11 pre-selects "This tab", turns off the extra options and ticks "Also share tab audio" where Chrome allows. Removing the prompt completely needs a small Chrome extension.
+
+## 16. What's new in v12: the free small-model fact-checking pipeline (RAG)
+
+Claims are now checked in three steps, all inside your Worker:
+1. **Analyze** (small open model, Llama 3.1 8B on Cloudflare Workers AI): is it a checkable fact or an opinion/prediction/question? It rewrites the claim so it stands alone using the sentences around it, and writes search queries. Opinions are marked "Not checked" and never reach the meter.
+2. **Retrieve**: published fact-check reviews (from your Google key), FactCheck.org's own search, Wikipedia, and (if you add Tavily) a web search limited to FactCheck.org, PolitiFact, AP, Reuters, Snopes, Full Fact, CBO, BLS, Census, BEA, GAO, CDC, FBI, Pew, NPR and BBC.
+3. **Verdict** (small model): judges only from the numbered sources, returns strict JSON. The Worker throws away any verdict that cites no source. Confidence is capped at "medium", so these count a little less in the meter than a published fact-check.
+
+**Setup (about 5 minutes):**
+1. Redeploy the new `worker/transcript-worker.js`, and upload the new `docs/` folder to GitHub.
+2. Worker → Settings → Bindings → Add → **Workers AI**, variable name `AI` (you may already have it from the Whisper backup).
+3. Strongly recommended: make a free account at tavily.com (1,000 searches a month, no card), copy the key, then Worker → Settings → Variables and Secrets → Secret `TAVILY_API_KEY`. Without it the checker only sees FactCheck.org, Wikipedia and your Google reviews, so more claims come back "could not verify".
+4. Open your Worker URL. You should see `"judge":"rag"`, `"search":"tavily+factcheck.org+wikipedia"` and a `ragModel`.
+
+**Notes**
+- Groq's Llama 3.1 8B and 3.3 70B were reported to move to Enterprise-only in Aug 2026, so Workers AI is used instead. The Groq fallback model is `openai/gpt-oss-20b` (`GROQ_LLM_MODEL`).
+- Cloudflare's free allowance is 10,000 "neurons" a day. At roughly 25 neurons per claim that is a few hundred claims a day (my estimate from the listed prices).
+- To try a different model, set the text variable `RAG_MODEL` (for example `@cf/mistral/mistral-7b-instruct-v0.1`).
+- `JUDGE_ENGINE` = `rag`, `gemini`, `anthropic` or `groq` forces one engine. Automatic order: Anthropic key, then RAG, then Gemini, then Groq+Wikipedia.
+- "Search this statement" now offers Gemini and Claude. Claude opens with the question filled in; choose a Haiku or Sonnet model there.

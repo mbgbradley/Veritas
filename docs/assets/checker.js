@@ -95,6 +95,7 @@ V.checker = (() => {
   async function check(text, ctx, opts) {
     const k = text.toLowerCase().replace(/\s+/g, ' ').trim();
     if (cache.has(k)) return cache.get(k);
+    let related = [];
     const p = (async () => {
       // Tier 1: published fact-checks
       if (V.settings.key) {
@@ -106,7 +107,10 @@ V.checker = (() => {
           factCheckSearch(q, null, text)
         ]);
         const seenUrl = new Set();
-        const hits = [...pri, ...all].filter(h => h.sim >= 0.5 && h.url && !seenUrl.has(h.url) && seenUrl.add(h.url));
+        const every = [...pri, ...all].filter(h => h.url && !seenUrl.has(h.url) && seenUrl.add(h.url));
+        const hits = every.filter(h => h.sim >= 0.6);
+        // weaker matches are not shown as the answer; the AI step reads them as evidence and decides whether they are about the same claim
+        related = every.filter(h => h.sim >= 0.3 && h.sim < 0.6).sort((a, b) => b.sim - a.sim).slice(0, 3).map(h => ({ claim: h.claim, publisher: h.publisher, rating: h.rating, url: h.url }));
         if (hits.length) {
           const rank = h => { const i = matchHost(host(h.url), V.config.checkers); return i < 0 ? 99 : i; };
           hits.sort((a, b) => rank(a) - rank(b) || b.sim - a.sim);
@@ -135,10 +139,11 @@ V.checker = (() => {
       if (judgeOn() && judgeLeft > 0) {
         judgeLeft--;
         const context = typeof ctx === 'function' ? await ctx() : (ctx || '');
-        const j = await V.yt.judge(text, context);
+        const j = await V.yt.judge(text, context, related);
+        if (j.skip) return { verdict: 'NOMATCH', sources: [], skip: true, detail: `<b>Not checked.</b> ${esc(j.explanation || 'Not a checkable factual claim.')}` };
         const sources = (j.sources || []).map(s => ({ url: s.url, label: s.title || host(s.url) }));
         if (j.verdict === 'TRUE' || j.verdict === 'MISLEADING' || j.verdict === 'FALSE') {
-          const label = { 'groq-wikipedia': 'Limited AI check</b> using Wikipedia excerpts only, not a web search', 'gemini-knowledge': 'Limited AI check</b> from the model’s own knowledge, with no live web search', 'gemini-grounded': 'AI research</b> using Google Search results through Gemini' }[j.engine] || 'AI research</b> using web sources';
+          const label = { 'groq-wikipedia': 'Limited AI check</b> using Wikipedia excerpts only, not a web search', 'gemini-knowledge': 'Limited AI check</b> from the model’s own knowledge, with no live web search', 'gemini-grounded': 'AI research</b> using Google Search results through Gemini' }[j.engine] || (/^rag:/.test(j.engine || '') ? 'AI fact-check</b> by a small open model (' + esc(j.engine.slice(4).replace('+web', '')) + ') that judged only the sources listed' : 'AI research</b> using web sources');
           return { verdict: j.verdict, sources, ai: true, score: bandScore(j.verdict, j.score), weight: j.confidence === 'high' ? 0.8 : 0.5,
             detail: `<b>${label}, not a published fact-check${j.confidence ? ' (confidence: ' + esc(j.confidence) + ')' : ''}. ${esc(j.explanation)}` + (j.standalone && j.standalone.toLowerCase().replace(/\W+/g, ' ').trim() !== text.toLowerCase().replace(/\W+/g, ' ').trim() ? ` <i>Checked in context as: “${esc(j.standalone)}”</i>` : '') };
         }

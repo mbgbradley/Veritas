@@ -4,8 +4,10 @@
 //   GET /transcript?v=VIDEO_ID   -> YouTube captions as timed segments
 //   GET /article?url=https://…   -> readable text of a web article
 //   GET /deepgram-token          -> short-lived key so the browser can stream tab audio to Deepgram
-//   POST /judge                  -> researches one claim and returns a verdict + truth score. Uses ANTHROPIC_API_KEY (web search),
-//                                   else GEMINI_API_KEY (Google Search when the free key allows it), else GROQ_API_KEY (Wikipedia only)
+//   POST /judge                  -> researches one claim and returns a verdict + truth score. Default (free): a small open-weights model
+//                                   (Llama 3.1 8B on Workers AI) that extracts the claim, retrieves evidence and judges only from it (RAG).
+//                                   Order: ANTHROPIC_API_KEY (web search) > RAG (binding AI or GROQ_API_KEY) > GEMINI_API_KEY > Groq+Wikipedia.
+//                                   JUDGE_ENGINE=rag|gemini|anthropic|groq forces one.
 //   GET /social?url=https://tiktok.com/…  -> TikTok caption/author and short-link resolution (no key needed)
 //   POST /transcribe             -> speech to text for one short audio chunk (WAV body). Free hosted Whisper:
 //                                   Groq first (GROQ_API_KEY), then Cloudflare Workers AI (binding named AI)
@@ -13,7 +15,10 @@
 // Settings (Worker > Settings > Variables and Secrets):
 //   GROQ_API_KEY      (Secret)  free Whisper large-v3-turbo from console.groq.com (no card needed)
 //   GROQ_WHISPER_MODEL (Text)   optional: whisper-large-v3 (more accurate, slower) instead of the default whisper-large-v3-turbo
-//   AI                (Binding) optional backup: Settings > Bindings > Add > Workers AI, variable name AI
+//   TAVILY_API_KEY    (Secret)  optional: free web search (1,000/month, no card) from tavily.com; makes the RAG checker much stronger
+//   RAG_MODEL         (Text)    optional Workers AI model for the RAG checker (default @cf/meta/llama-3.1-8b-instruct-fp8-fast)
+//   GROQ_LLM_MODEL    (Text)    optional Groq fallback model for the RAG checker (default openai/gpt-oss-20b)
+//   AI                (Binding) Workers AI: runs the RAG checker's model (and is a Whisper backup): Settings > Bindings > Add > Workers AI, variable name AI
 //   SUPADATA_API_KEY  (Secret)  recommended: a hosted transcript provider. YouTube often blocks Cloudflare's
 //                               servers, so reading captions directly can fail; this route avoids that.
 //   ANTHROPIC_API_KEY (Secret)  lets Veritas research and judge claims no fact-checker has covered
@@ -49,7 +54,7 @@ export default {
       if (url.pathname === '/judge' && req.method === 'POST') return json(await judge(await req.json(), env), cors, 0);
       if (url.pathname === '/social') return json(await social(url.searchParams.get('url')), cors, 300);
       if (url.pathname === '/transcribe' && req.method === 'POST') return json(await transcribe(req, url, env), cors, 0);
-      return json({ ok: true, groq: !!env.GROQ_API_KEY, workersAi: !!(env.AI && env.AI.run), deepgram: !!env.DEEPGRAM_API_KEY, supadata: !!env.SUPADATA_API_KEY, anthropic: !!env.ANTHROPIC_API_KEY, gemini: !!env.GEMINI_API_KEY, judge: env.ANTHROPIC_API_KEY ? 'anthropic' : (env.GEMINI_API_KEY ? 'gemini' : (env.GROQ_API_KEY ? 'groq' : '')), originLocked: allowed !== '*', routes: ['/transcript?v=', '/article?url=', '/deepgram-token', 'POST /judge', 'POST /transcribe', '/social?url='] }, cors, 0);
+      return json({ ok: true, groq: !!env.GROQ_API_KEY, workersAi: !!(env.AI && env.AI.run), deepgram: !!env.DEEPGRAM_API_KEY, supadata: !!env.SUPADATA_API_KEY, anthropic: !!env.ANTHROPIC_API_KEY, gemini: !!env.GEMINI_API_KEY, judge: judgeEngine(env), search: env.TAVILY_API_KEY ? 'tavily+factcheck.org+wikipedia' : 'factcheck.org+wikipedia', ragModel: ragReady(env) ? ((env.AI && env.AI.run ? (env.RAG_MODEL || '@cf/meta/llama-3.1-8b-instruct-fp8-fast') : (env.GROQ_LLM_MODEL || 'openai/gpt-oss-20b'))) : '', originLocked: allowed !== '*', routes: ['/transcript?v=', '/article?url=', '/deepgram-token', 'POST /judge', 'POST /transcribe', '/social?url='] }, cors, 0);
     } catch (e) {
       const status = (e && e.status) || 502;
       return json({ error: String((e && e.message) || e), retryAfter: (e && e.retryAfter) || 0 }, cors, 0, status);
@@ -274,6 +279,129 @@ async function groqJudge(body, env) {
   return { ...done, sources };
 }
 
+/* ---------- Free RAG fact-check pipeline (small open-weights model + retrieval) ----------
+   1. ANALYZE  (small model): is this a checkable factual claim? Rewrite it so it stands alone, using the surrounding statements, and write search queries.
+   2. RETRIEVE (no model): published fact-check reviews sent by the browser, FactCheck.org's own search, Tavily web search limited to trusted outlets
+               (if TAVILY_API_KEY is set), and Wikipedia for background facts.
+   3. VERDICT  (small model): judge ONLY from the numbered evidence and return strict JSON with the evidence it used. The Worker then checks that
+               the cited evidence exists; a verdict that cites nothing becomes UNVERIFIABLE.
+   Model: Cloudflare Workers AI (binding AI), default Llama 3.1 8B, free daily allowance. Fallback: Groq (GROQ_LLM_MODEL, default openai/gpt-oss-20b). */
+const TRUSTED_DOMAINS = ['factcheck.org', 'politifact.com', 'apnews.com', 'reuters.com', 'snopes.com', 'fullfact.org', 'usafacts.org', 'cbo.gov', 'bls.gov', 'census.gov', 'bea.gov', 'federalreserve.gov', 'congress.gov', 'gao.gov', 'cdc.gov', 'fbi.gov', 'pewresearch.org', 'npr.org', 'bbc.com'];
+const stripTags = s => decode(String(s || '').replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
+
+async function llmJson(env, system, user, maxTokens) {
+  const errs = [];
+  const parse = t => {
+    if (t && typeof t === 'object') return t;
+    const m = String(t || '').match(/\{[\s\S]*\}/); if (!m) return null;
+    try { return JSON.parse(m[0]); } catch { return null; }
+  };
+  if (env.AI && env.AI.run) {
+    const model = env.RAG_MODEL || '@cf/meta/llama-3.1-8b-instruct-fp8-fast';
+    try {
+      const r = await env.AI.run(model, { messages: [{ role: 'system', content: system }, { role: 'user', content: user }], max_tokens: maxTokens, temperature: 0 });
+      const raw = r && (r.response !== undefined ? r.response : (r.choices && r.choices[0] && r.choices[0].message && r.choices[0].message.content));
+      const out = parse(raw);
+      if (out) return { out, model: model.split('/').pop() };
+      errs.push(model + ' returned unreadable output');
+    } catch (e) { errs.push(model + ': ' + String((e && e.message) || e).slice(0, 120)); }
+  }
+  if (env.GROQ_API_KEY) {
+    const model = env.GROQ_LLM_MODEL || 'openai/gpt-oss-20b';
+    try {
+      const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST', headers: { Authorization: 'Bearer ' + env.GROQ_API_KEY, 'content-type': 'application/json' },
+        body: JSON.stringify({ model, temperature: 0, max_tokens: Math.max(maxTokens, 1500), response_format: { type: 'json_object' }, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] })
+      });
+      const j = await r.json().catch(() => ({}));
+      if (r.ok) { const out = parse(j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content); if (out) return { out, model: model.split('/').pop() }; errs.push(model + ' returned unreadable output'); }
+      else errs.push(model + ': HTTP ' + r.status);
+    } catch (e) { errs.push(model + ': ' + String((e && e.message) || e).slice(0, 100)); }
+  }
+  throw httpError(502, 'No small model answered. ' + (errs.join('; ') || 'Add the Workers AI binding named AI, or GROQ_API_KEY.'));
+}
+
+const ANALYZE_PROMPT = today => `You prepare ONE statement from an automatically transcribed political video for fact-checking. Today is ${today}.
+Reply with ONLY a JSON object: {"checkable":true,"kind":"fact","standalone":"","queries":["",""]}
+- checkable is true ONLY for a specific statement about the past or present that evidence could confirm or refute: a number, record, date, event, official action, quote, law, or public fact.
+- checkable is false for opinions, predictions, promises, slogans, insults, jokes, questions, vague statements, and a speaker describing what someone else claims. Set "kind" to opinion, prediction, question, quote or vague.
+- "standalone": rewrite the statement so it makes sense on its own, using the surrounding statements: names instead of he/she/they/it/that, the time period and place filled in. At most 40 words. Never add a fact the speaker did not say.
+- "queries": two short web search queries (under 12 words each) a fact-checker would type. Use names, figures and years. Make the second one end with "fact check".`;
+
+const VERDICT_PROMPT = today => `You are a careful, neutral fact-checker. Today is ${today}.
+You get ONE claim and numbered EVIDENCE items. Judge the claim ONLY from the evidence. Do not use memory.
+- A published fact-check counts only if it is about the SAME claim (same person, figure and time period). Otherwise ignore it.
+- Official data and news reports count only if they directly state the figure or event in the claim. Check the dates: old evidence does not prove a current figure.
+- TRUE: the evidence confirms the whole claim. FALSE: the evidence clearly contradicts it. MISLEADING: partly right, but missing important context or framed to give a wrong impression.
+- If the evidence does not directly address the claim, answer UNVERIFIABLE. Prefer UNVERIFIABLE over a guess.
+- "score" is how accurate the claim is, 0 to 100, and must agree: TRUE 75-98, MISLEADING 35-74, FALSE 2-34.
+- "used" lists the numbers of the evidence items your verdict rests on. A verdict with an empty "used" is not allowed.
+Reply with ONLY a JSON object: {"verdict":"TRUE|MISLEADING|FALSE|UNVERIFIABLE","confidence":"high|medium|low","score":0,"explanation":"one or two plain sentences naming the figures or sources","used":[1]}`;
+
+async function tavilySearch(query, key, domains) {
+  const r = await fetch('https://api.tavily.com/search', {
+    method: 'POST', headers: { Authorization: 'Bearer ' + key, 'content-type': 'application/json' },
+    body: JSON.stringify({ query: query.slice(0, 380), search_depth: 'basic', max_results: 5, include_answer: false, ...(domains ? { include_domains: domains } : { exclude_domains: ['facebook.com', 'x.com', 'twitter.com', 'reddit.com', 'tiktok.com', 'instagram.com', 'youtube.com'] }) })
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error('Tavily HTTP ' + r.status);
+  return (j.results || []).filter(x => x && /^https?:\/\//.test(x.url || '')).map(x => ({ title: String(x.title || '').slice(0, 140), url: x.url, text: String(x.content || '').replace(/\s+/g, ' ').slice(0, 520), date: String(x.published_date || '').slice(0, 10), src: 'web' }));
+}
+// FactCheck.org is a WordPress site, so its public search endpoint needs no key.
+async function factCheckOrgSearch(query) {
+  const r = await fetch('https://www.factcheck.org/wp-json/wp/v2/posts?per_page=4&_fields=link,title,excerpt,date&search=' + encodeURIComponent(query.slice(0, 200)), { headers: { 'user-agent': WIKI_UA, accept: 'application/json' } });
+  if (!r.ok) throw new Error('FactCheck.org HTTP ' + r.status);
+  const a = await r.json().catch(() => []);
+  return (Array.isArray(a) ? a : []).map(p => ({ title: stripTags(p.title && p.title.rendered).slice(0, 140), url: p.link, text: stripTags(p.excerpt && p.excerpt.rendered).slice(0, 520), date: String(p.date || '').slice(0, 10), src: 'factcheck.org' })).filter(x => x.url);
+}
+
+async function gatherEvidence(env, standalone, queries, reviews) {
+  const items = [], notes = [];
+  (Array.isArray(reviews) ? reviews : []).slice(0, 3).forEach(v => {
+    if (v && /^https?:\/\//.test(v.url || '')) items.push({ title: `${String(v.publisher || 'Fact-checker').slice(0, 40)} review`, url: v.url, src: 'review',
+      text: `Published fact-check (rating: “${String(v.rating || 'n/a').slice(0, 40)}”) of this claim: “${String(v.claim || '').slice(0, 300)}”` });
+  });
+  const q1 = queries[0] || standalone, q2 = queries[1] || (standalone + ' fact check');
+  const jobs = [factCheckOrgSearch(q1), wikiEvidence(standalone).then(ev => ev.slice(0, 2).map(e => ({ title: e.title + ' (Wikipedia)', url: e.url, text: e.text.slice(0, 500), src: 'wikipedia' })))];
+  if (env.TAVILY_API_KEY) {
+    jobs.push(tavilySearch(q2, env.TAVILY_API_KEY, TRUSTED_DOMAINS).then(async r => r.length >= 2 ? r : r.concat(await tavilySearch(q1, env.TAVILY_API_KEY, null))));
+  }
+  const res = await Promise.allSettled(jobs);
+  res.forEach(r => { if (r.status === 'fulfilled') items.push(...r.value); else notes.push(String(r.reason && r.reason.message || r.reason).slice(0, 80)); });
+  const seen = new Set(), out = [];
+  for (const it of items) { if (!it.text || seen.has(it.url)) continue; seen.add(it.url); out.push(it); if (out.length >= 8) break; }
+  return { evidence: out, notes };
+}
+
+async function ragJudge(body, env) {
+  const claim = String((body && body.claim) || '').slice(0, 600);
+  if (claim.split(/\s+/).length < 4) throw new Error('Claim is too short');
+  const context = String((body && body.context) || '').slice(0, 1400);
+  const today = /^\d{4}-\d{2}-\d{2}$/.test((body && body.today) || '') ? body.today : new Date().toISOString().slice(0, 10);
+  // 1. analyze
+  const a = await llmJson(env, ANALYZE_PROMPT(today), `Statement: "${claim}"\n\nContext (video title, then statements before and after): ${context || 'none'}`, 400);
+  const standalone = String(a.out.standalone || claim).replace(/\s+/g, ' ').trim().slice(0, 300) || claim;
+  if (a.out.checkable === false || a.out.checkable === 'false') {
+    const kind = String(a.out.kind || 'opinion').replace(/[^a-z ]/gi, '').slice(0, 20) || 'opinion';
+    return { verdict: 'UNVERIFIABLE', confidence: 'low', explanation: `Not a checkable factual claim (${kind}).`, score: null, standalone, sources: [], engine: 'rag', skip: true };
+  }
+  const queries = (Array.isArray(a.out.queries) ? a.out.queries : []).map(q => String(q || '').replace(/\s+/g, ' ').trim().slice(0, 140)).filter(Boolean).slice(0, 2);
+  // 2. retrieve
+  const { evidence, notes } = await gatherEvidence(env, standalone, queries, body && body.reviews);
+  if (!evidence.length) return { verdict: 'UNVERIFIABLE', confidence: 'low', explanation: 'No sources were found for this claim' + (notes.length ? ' (' + notes.join('; ') + ')' : '') + '.', score: null, standalone, sources: [], engine: 'rag' };
+  // 3. verdict
+  const ev = evidence.map((e, i) => `[${i + 1}] ${e.title}${e.date ? ' (' + e.date + ')' : ''} <${new URL(e.url).hostname.replace(/^www\./, '')}>: ${e.text}`).join('\n\n');
+  const v = await llmJson(env, VERDICT_PROMPT(today), `Claim: "${standalone}"\n\nSurrounding statements, for meaning only: ${context.slice(0, 700) || 'none'}\n\nEVIDENCE:\n${ev}`, 450);
+  const used = [...new Set((Array.isArray(v.out.used) ? v.out.used : []).map(Number).filter(n => Number.isInteger(n) && n >= 1 && n <= evidence.length))];
+  const out = { ...v.out };
+  if (['TRUE', 'MISLEADING', 'FALSE'].includes(String(out.verdict).toUpperCase()) && !used.length) { out.verdict = 'UNVERIFIABLE'; out.explanation = 'The model gave a verdict without citing any evidence, so it was discarded.'; }
+  out.verdict = String(out.verdict || '').toUpperCase();
+  out.standalone = standalone;
+  const done = finalizeJudgment(out, 'rag:' + v.model + (env.TAVILY_API_KEY ? '+web' : ''), 'medium');
+  const pick = used.length ? used.map(n => evidence[n - 1]) : evidence.slice(0, 2);
+  return { ...done, sources: pick.slice(0, 3).map(e => ({ title: e.title, url: e.url })) };
+}
+
 /* ---------- Social links: TikTok details (public oEmbed) and short-link resolution ---------- */
 const TIKTOK_HOST = /(^|\.)tiktok\.com$/i;
 async function social(target) {
@@ -307,10 +435,21 @@ Use at most 3 sources, taken from your search.
 CONTEXT: you also get the video title and the statements spoken just BEFORE and AFTER the claim. Use them to work out who "they", "he", "it" or "that" refers to, which time period and place are meant, and what the speaker actually means. Judge the claim as the speaker meant it in context, not as an isolated string. If the context shows it is a question, a joke, a hypothetical, or the speaker quoting or describing someone else's claim, answer UNVERIFIABLE and say why.
 "standalone" is the claim rewritten so it makes sense on its own (names instead of pronouns, the time period filled in), in at most 40 words. Do not add facts the speaker did not say.`;
 
+const ragReady = env => !!((env.AI && env.AI.run) || env.GROQ_API_KEY);
+function judgeEngine(env) {
+  const f = String(env.JUDGE_ENGINE || '').toLowerCase();
+  if (['rag', 'gemini', 'anthropic', 'groq'].includes(f)) return f;
+  return env.ANTHROPIC_API_KEY ? 'anthropic' : ragReady(env) ? 'rag' : env.GEMINI_API_KEY ? 'gemini' : env.GROQ_API_KEY ? 'groq' : '';
+}
 async function judge(body, env) {
-  if (!env.ANTHROPIC_API_KEY && env.GEMINI_API_KEY) return geminiJudge(body, env);   // free tier, Google Search when allowed
-  if (!env.ANTHROPIC_API_KEY && env.GROQ_API_KEY) return groqJudge(body, env);       // free, Wikipedia excerpts only
-  if (!env.ANTHROPIC_API_KEY) throw new Error('No claim-research key is set on the worker (GEMINI_API_KEY, GROQ_API_KEY or ANTHROPIC_API_KEY)');
+  const eng = judgeEngine(env);
+  if (eng === 'rag') {
+    try { return await ragJudge(body, env); }
+    catch (e) { if (env.GEMINI_API_KEY && !env.JUDGE_ENGINE) return geminiJudge(body, env); throw e; }   // safety net only
+  }
+  if (eng === 'gemini') return geminiJudge(body, env);   // free tier, Google Search when allowed
+  if (eng === 'groq') return groqJudge(body, env);       // free, Wikipedia excerpts only
+  if (eng !== 'anthropic' || !env.ANTHROPIC_API_KEY) throw new Error('No claim-research engine is set on the worker (add the Workers AI binding named AI, or GEMINI_API_KEY, GROQ_API_KEY or ANTHROPIC_API_KEY)');
   const claim = String((body && body.claim) || '').slice(0, 600);
   if (claim.split(/\s+/).length < 4) throw new Error('Claim is too short');
   const context = String((body && body.context) || '').slice(0, 1400);
